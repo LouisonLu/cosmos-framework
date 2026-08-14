@@ -6,7 +6,7 @@ import pytest
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from cosmos_framework.data.generator.action.pose_utils import (
+from cosmos_framework.data.generator.action.utils.pose_utils import (
     _normalize_rotation_matrices,
     _to_numpy_float32,
     build_abs_pose_from_components,

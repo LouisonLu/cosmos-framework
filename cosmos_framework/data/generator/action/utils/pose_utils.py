@@ -712,7 +712,7 @@ def compute_idle_frames(
 
     # Import locally to avoid a circular import at module load time
     # (action_spec.py imports RotationConvention from this file).
-    from cosmos_framework.data.generator.action.action_spec import DimType
+    from cosmos_framework.data.generator.action.utils.action_spec import DimType
 
     pos_idx = [i for i, t in enumerate(spec.types) if t == DimType.POS]
     rot_idx = [i for i, t in enumerate(spec.types) if t == DimType.ROT]
