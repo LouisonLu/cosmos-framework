@@ -52,6 +52,9 @@ EMBODIMENT_TO_DOMAIN_ID: dict[str, int] = {
     # DomainAwareLinear weights. New embodiments append above the maximum; the gaps
     # at 10/11/14/18/19 index retired embodiments and are not reused.
     "maniparena_mobile": 29,
+    # RoboCasa PandaOmron mobile manipulation (10/15/20D raw action per
+    # ``use_base_action`` / ``base_encoding``); appended above the maximum.
+    "robocasa": 30,
 }
 
 
@@ -86,11 +89,12 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
     "so101-bimanual-midtrain-conditional": 20,
     "geniesim3_g2a": 29,
     "geniesim3_g2a_joint": 16,
-    # NOTE: ``libero`` (7/10/13 depending on ``rotation_space``) and ``hand_pose``
-    # (variable with ``keypoint_option`` and ``rotation_format``) are absent
-    # because their raw width is set per-dataset at construction time. Inference
-    # in inverse_dynamics/WAM modes is not supported for these domains until
-    # canonical widths are added here.
+    # NOTE: ``libero`` (7/10/13 depending on ``rotation_space``), ``hand_pose``
+    # (variable with ``keypoint_option`` and ``rotation_format``) and ``robocasa``
+    # (10 arm-only, 15/20 with the mobile base, per ``use_base_action`` /
+    # ``base_encoding``) are absent because their raw width is set per-dataset at
+    # construction time. Inference in inverse_dynamics/WAM modes is not supported
+    # for these domains until canonical widths are added here.
 }
 
 
