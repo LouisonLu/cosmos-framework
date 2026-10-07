@@ -8,16 +8,17 @@ outpainting. It does not change the existing vision SFT or transfer recipes.
 Each sample is packed as three vision items:
 
 1. masked RGB first frame, shape `[3, 1, 512, 1024]`
-2. full PCD/depth control video, shape `[3, 93, 512, 1024]`
+2. masked PCD/depth control video, shape `[3, 93, 512, 1024]`
 3. full RGB target video, shape `[3, 93, 512, 1024]`
 
 The prompt is read from `prompt_path` or `prompt` in the JSONL manifest.
-RGB and PCD frames are aligned by frame index. The PCD control is not masked;
-only the first RGB reference is masked. The mask uses white as visible input
-and black as the outpainted region.
+RGB and PCD frames are aligned by frame index. The same spatial mask is
+applied to the first RGB frame and every PCD frame. The RGB target remains
+complete. The mask uses white as visible input and black as the outpainted
+region.
 
-The Cosmos3 sequence plan marks the first two vision items as clean controls
-and the final RGB item as generated. The recipe sets
+The Cosmos3 sequence plan marks the first two vision items as controls and the
+final RGB item as generated. The recipe sets
 `model.config.causal_training_strategy=teacher_forcing` so fully-clean control
 items are excluded from the scalar flow-matching mean. Stage1 therefore
 computes loss on the complete RGB target, with no target-validity mask.
