@@ -5,11 +5,13 @@
 
 Each sample is packed as three vision items:
 
-    [masked RGB first-frame image, full PCD control video, full RGB target video]
+    [masked RGB first-frame image, masked PCD control video, full RGB target video]
 
-The first two items are automatically treated as fully-clean controls by the
-Cosmos3 sequence packer.  The last item has an empty conditioning-frame list,
+The first two items are automatically treated as controls by the Cosmos3
+sequence packer.  The last item has an empty conditioning-frame list,
 so its complete RGB target latent is used by the standard flow-matching loss.
+The same spatial mask is applied to every PCD frame; no mask is applied to the
+RGB target.
 No target-validity mask is emitted; that belongs to the future Stage2 pipeline.
 """
 
@@ -233,6 +235,7 @@ class PwPStage1Dataset(SFTDataset):
             keep_mask = resize_keep_mask(keep_mask, self.target_height, self.target_width)
 
             masked_first = apply_keep_mask(rgb[:1], keep_mask, self.mask_fill_value)
+            masked_pcd = apply_keep_mask(pcd, keep_mask, self.mask_fill_value)
             target = rgb
 
             caption = metadata["prompt"]
@@ -253,7 +256,7 @@ class PwPStage1Dataset(SFTDataset):
                 "frame_start": start,
                 "frame_end": end,
                 "num_frames": len(target),
-                "video": [_normalize(masked_first), _normalize(pcd), _normalize(target)],
+                "video": [_normalize(masked_first), _normalize(masked_pcd), _normalize(target)],
                 "num_multiplier": interval,
                 "conditioning_fps": float(rgb_info["fps"] if self.conditioning_fps < 0 else self.conditioning_fps),
                 "image_size": [image_size, image_size.clone(), image_size.clone()],
@@ -267,8 +270,8 @@ class PwPStage1Dataset(SFTDataset):
                     # Empty means every latent of the final RGB item is noisy and supervised.
                     condition_frame_indexes_vision=[],
                     share_vision_temporal_positions=False,
-                    # The first RGB image is an independent reference. The PCD and RGB target
-                    # are frame-aligned controls, so they share one temporal-position group.
+                    # The first RGB image is an independent reference. The masked PCD control
+                    # and RGB target are frame-aligned, so they share one temporal-position group.
                     vision_temporal_position_groups=[None, 0, 0],
                 ),
             }
