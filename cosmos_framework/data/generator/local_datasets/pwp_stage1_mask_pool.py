@@ -5,8 +5,8 @@
 
 The pool stores binary *keep* masks: white pixels are visible input and black
 pixels are replaced by ``fill_value``.  One mask is sampled per sample and the
-same resized mask is applied to the first RGB frame.  The PCD control remains
-full-frame so it supplies geometry for the entire ERP.
+same resized mask is applied to the first RGB frame and every PCD control
+frame.  The RGB target remains full-frame.
 """
 
 from __future__ import annotations
