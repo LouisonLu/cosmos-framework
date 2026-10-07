@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""PwP Stage1 Nano generator recipe: masked first RGB + full PCD -> full RGB ERP."""
+"""PwP Stage1 Nano generator recipe: masked RGB + masked PCD -> full RGB ERP."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ _PWP_STAGE1_NANO_MODEL_CONFIG = copy.deepcopy(NANO_MODEL_CONFIG)
 _PWP_STAGE1_NANO_MODEL_CONFIG["action_gen"] = False
 _PWP_STAGE1_NANO_MODEL_CONFIG["lora_enabled"] = False
 _PWP_STAGE1_NANO_MODEL_CONFIG["resolution"] = "480"
-# The two input items are fully clean controls.  This keeps them out of the
+# The two input items are deterministic controls. This keeps them out of the
 # scalar flow-matching mean so Stage1 optimizes only the final RGB target.
 _PWP_STAGE1_NANO_MODEL_CONFIG["causal_training_strategy"] = "teacher_forcing"
 
