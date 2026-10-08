@@ -56,6 +56,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip Cosmos Guardrail1 downloads and safety post-processing for this local experiment.",
     )
+    parser.add_argument(
+        "--no-ema-weights",
+        dest="use_ema_weights",
+        action="store_false",
+        help="Load regular checkpoint weights instead of net_ema weights.",
+    )
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--num-frames", type=int, default=93)
@@ -80,7 +86,7 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Keep the model-predicted first frame without decode-space restoration.",
     )
-    parser.set_defaults(hardlock_first_frame=True)
+    parser.set_defaults(hardlock_first_frame=True, use_ema_weights=True)
     return parser.parse_args()
 
 
@@ -94,6 +100,7 @@ def run(args: argparse.Namespace) -> Path:
         "output_dir": output_dir,
         "sampler": "unipc",
         "guardrails": not args.no_guardrails,
+        "use_ema_weights": args.use_ema_weights,
     }
     if args.config_file is not None:
         setup_kwargs["config_file"] = args.config_file
@@ -138,6 +145,7 @@ def run(args: argparse.Namespace) -> Path:
                 "num_frames": int(prepared.pcd_frames.shape[0]),
                 "fps": prepared.fps,
                 "hardlock_first_frame": args.hardlock_first_frame,
+                "use_ema_weights": args.use_ema_weights,
             },
             indent=2,
         ),
