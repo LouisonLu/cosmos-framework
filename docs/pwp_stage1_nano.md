@@ -23,6 +23,14 @@ final RGB item as generated. The recipe sets
 excluded from the scalar flow-matching mean. Stage1 therefore
 computes loss on the complete RGB target, with no target-validity mask.
 
+The mask is sampled once per sample. With the DB235 dynamic sampler, the
+default family probabilities are `av2=60%`, `native_fov=10%`, `viewdrop=10%`,
+`renderer_confidence=10%`, and `mixed=10%`. Inside `av2`, the
+`mask_10_15_percent`, `mask_15_20_percent`, and `mask_20_25_percent` buckets
+are equally likely. Files are sampled uniformly within the selected family or
+bucket. The same mask is applied to the first RGB frame and every PCD frame;
+the RGB target is never masked.
+
 ## Inference contract
 
 The independent inference entry point uses the same three-item contract and
@@ -90,9 +98,11 @@ python tools/pwp_stage1_check_dataset.py /data/manifests/pwp_stage1.jsonl
 
 ## Launch
 
-`PWP_STAGE1_MASK_POOL_ROOT` must contain binary PNG keep masks. A legacy
-dynamic sampler can be supplied with `PWP_STAGE1_MASK_POOL_SAMPLER_PY` and
-`PWP_STAGE1_MASK_POOL_KWARGS`.
+`PWP_STAGE1_MASK_POOL_ROOT` must contain the DB235 train/val family layout with
+binary PNG keep masks. The launcher uses the repository's weighted dynamic
+sampler by default. Override `PWP_STAGE1_MASK_POOL_SAMPLER_PY` only when using
+another compatible sampler. The manifest must not set `mask_path`, because a
+record-level mask takes precedence over the pool.
 
 ```bash
 export PWP_STAGE1_MANIFEST=/data/manifests/pwp_stage1.jsonl
@@ -101,9 +111,13 @@ export BASE_CHECKPOINT_PATH=/models/Cosmos3-Nano
 export WAN_VAE_PATH=/models/Wan2.2_VAE.pth
 export OUTPUT_ROOT=/outputs/cosmos3_pwp_stage1_nano
 export NPROC_PER_NODE=8
+export PWP_STAGE1_MASK_POOL_KWARGS='{"split":"train"}'
 
 bash examples/launch_sft_pwp_stage1_nano.sh
 ```
+
+With 2000 records, eight GPUs, per-GPU batch 1, and `grad_accum_iter=1`, the
+2000 optimizer iterations represent eight complete passes over the dataset.
 
 The launcher writes the training log below `OUTPUT_ROOT/logs` and checkpoints
 according to the isolated Stage1 TOML recipe. Stage2 is intentionally not part

@@ -58,7 +58,8 @@ warm_up_steps      = [100]
 
 [trainer]
 distributed_parallelism = "fsdp"
-grad_accum_iter         = 2
+# One sample per GPU and eight GPUs: 2000 samples / 8 = 250 steps per epoch.
+grad_accum_iter         = 1
 logging_iter            = 1
 max_iter                = 2000
 

@@ -42,6 +42,7 @@ pwp_stage1_nano.optimizer.keys_to_select = [
     "llm2vae",
 ]
 pwp_stage1_nano.optimizer.lr = 1.0e-4
+pwp_stage1_nano.trainer.grad_accum_iter = 1
 pwp_stage1_nano.trainer.max_iter = 2000
 pwp_stage1_nano.checkpoint.save_iter = 250
 pwp_stage1_nano.dataloader_train = L(PackingDataLoader)(
