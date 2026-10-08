@@ -57,6 +57,7 @@ def run(args: argparse.Namespace) -> Path:
 
     masked_first = apply_keep_mask(prepared.first_frame, prepared.keep_mask, args.mask_fill_value)
     masked_pcd = apply_keep_mask(prepared.pcd_frames, prepared.keep_mask, args.mask_fill_value)
+    generated_placeholder = np.zeros_like(masked_pcd)
     mask_rgb = np.repeat((prepared.keep_mask.astype(np.uint8) * 255)[..., None], 3, axis=2)
     mask_video = np.repeat(mask_rgb[None], masked_pcd.shape[0], axis=0)
 
@@ -73,6 +74,12 @@ def run(args: argparse.Namespace) -> Path:
     save_img_or_video(
         torch.from_numpy(mask_video).permute(3, 0, 1, 2),
         str(output_dir / "guided_generation_mask_video"),
+        fps=prepared.fps,
+        quality=10,
+    )
+    save_img_or_video(
+        torch.from_numpy(generated_placeholder).permute(3, 0, 1, 2),
+        str(output_dir / "generated_rgb_placeholder_model_input"),
         fps=prepared.fps,
         quality=10,
     )
