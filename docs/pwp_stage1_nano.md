@@ -23,6 +23,39 @@ final RGB item as generated. The recipe sets
 excluded from the scalar flow-matching mean. Stage1 therefore
 computes loss on the complete RGB target, with no target-validity mask.
 
+## Inference contract
+
+The independent inference entry point uses the same three-item contract and
+does not use the generic `vision_path` video-to-video route:
+
+```text
+masked first-frame image + masked PCD video + prompt
+                              -> generated full RGB video
+```
+
+The spatial guided-generation mask is a binary keep mask: white pixels are
+copied into the first-frame and PCD controls, while black pixels are filled
+with zero. The generated RGB item is an empty placeholder and is fully
+sampled. A full RGB target video is therefore not needed at inference time.
+
+```bash
+python examples/inference_pwp_stage1.py \
+  --checkpoint-path /models/cosmos3-nano-pwp-stage1-iter100-full \
+  --first-frame-path /data/scene_0001_first_frame.png \
+  --pcd-path /data/scene_0001_pcd.mp4 \
+  --guided-generation-mask-path /data/mask_pool/mask_0001.png \
+  --prompt-path /data/prompts/scene_0001_prompt.json \
+  --output-dir /outputs/pwp_stage1_iter100_scene_0001 \
+  --num-frames 93 \
+  --seed 0
+```
+
+`--guided-generation-mask-path` may be omitted for an all-white control mask
+(`--mask-path` is accepted as an alias). The first-frame white-mask region is
+restored after decode by default; use `--no-hardlock-first-frame` to inspect
+the raw model prediction. This hardlock is a decode-space blend, separate from
+the Stage1 model conditioning and from a Stage2 target-loss mask.
+
 Cosmos3-Nano is the 16B unified reasoner/generator model. The recipe updates
 only `moe_gen`, `time_embedder`, `vae2llm`, and `llm2vae`; the reasoning tower
 is frozen. This is generator-only training, not LoRA and not full fine-tuning.
