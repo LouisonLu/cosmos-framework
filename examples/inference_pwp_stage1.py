@@ -51,6 +51,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--prompt-path", required=True, help="Plain text or structured caption JSON.")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--no-guardrails",
+        action="store_true",
+        help="Skip Cosmos Guardrail1 downloads and safety post-processing for this local experiment.",
+    )
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--num-frames", type=int, default=93)
@@ -88,6 +93,7 @@ def run(args: argparse.Namespace) -> Path:
         "checkpoint_path": args.checkpoint_path,
         "output_dir": output_dir,
         "sampler": "unipc",
+        "guardrails": not args.no_guardrails,
     }
     if args.config_file is not None:
         setup_kwargs["config_file"] = args.config_file
