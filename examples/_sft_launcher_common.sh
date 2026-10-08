@@ -26,6 +26,8 @@
 #                        has no torchrun env fallback, so it must be passed here).
 #   LOG_FILENAME         override $LOG_DIR/${LOG_FILENAME}
 #                        (default <toml-stem>_sft.log).
+#   QUIET_CONSOLE        when 1, keep the complete tee log but suppress known
+#                        expected distributed/checkpoint warnings on the console.
 #
 # Absolute paths are passed through; relative paths are anchored to the repo
 # root (the parent of this examples/ directory). Paths set in the caller's
@@ -95,11 +97,20 @@ TORCHRUN_ARGS=(--nproc_per_node="${NPROC_PER_NODE:-8}" --master_port="${MASTER_P
 [[ -n "${NODE_RANK:-}" ]]   && TORCHRUN_ARGS+=(--node_rank="$NODE_RANK")
 [[ -n "${MASTER_ADDR:-}" ]] && TORCHRUN_ARGS+=(--master_addr="$MASTER_ADDR")
 
-IMAGINAIRE_OUTPUT_ROOT="$IMAGINAIRE_OUTPUT_ROOT" PYTHONPATH=. \
-    torchrun "${TORCHRUN_ARGS[@]}" -m cosmos_framework.scripts.train \
-    --sft-toml="$TOML_FILE" \
-    "${TRAILING_ARGS[@]}" \
-    2>&1 | tee "$LOG_FILE"
+if [[ "${QUIET_CONSOLE:-0}" == "1" ]]; then
+    IMAGINAIRE_OUTPUT_ROOT="$IMAGINAIRE_OUTPUT_ROOT" PYTHONPATH=. \
+        torchrun "${TORCHRUN_ARGS[@]}" -m cosmos_framework.scripts.train \
+        --sft-toml="$TOML_FILE" \
+        "${TRAILING_ARGS[@]}" \
+        2>&1 | tee "$LOG_FILE" | grep --line-buffered -Ev \
+        'Skipping loading of key: net_ema\.|\[DCP-LOAD-(SKIP-KEYS|DEDUP)\]|Length of IterableDataset|c10d_logger\.py:83: UserWarning|barrier\(\): using the device under current context|OFUCallback: no nvidia-smi samples collected|^[[:space:]]+(batch = next\(self\.dataloaders\[index_id\]\)|return func\(\*args, \*\*kwargs\))'
+else
+    IMAGINAIRE_OUTPUT_ROOT="$IMAGINAIRE_OUTPUT_ROOT" PYTHONPATH=. \
+        torchrun "${TORCHRUN_ARGS[@]}" -m cosmos_framework.scripts.train \
+        --sft-toml="$TOML_FILE" \
+        "${TRAILING_ARGS[@]}" \
+        2>&1 | tee "$LOG_FILE"
+fi
 
 EXIT_CODE=${PIPESTATUS[0]}
 echo ">>> $(date '+%H:%M:%S') Done (exit $EXIT_CODE)"
