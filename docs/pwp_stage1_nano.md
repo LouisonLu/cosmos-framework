@@ -64,6 +64,53 @@ restored after decode by default; use `--no-hardlock-first-frame` to inspect
 the raw model prediction. This hardlock is a decode-space blend, separate from
 the Stage1 model conditioning and from a Stage2 target-loss mask.
 
+## Batch inference
+
+`examples/inference_pwp_stage1_batch.py` keeps the Cosmos2.5-style directory
+layout while loading the Cosmos3 checkpoint only once:
+
+```text
+<data-root>/
+├── rgb_videos/<stem>.mp4
+├── pcd_videos/<stem>_pcd.mp4
+└── prompts/<stem>_prompt.json
+```
+
+Use `--mask-path` for one common PNG mask. A per-sample `mask_videos/` directory
+is also supported with `<stem>_mask.png` or `<stem>_mask.mp4`; a mask video is
+converted to its binary frame 0 because the Cosmos3 Stage1 preprocessor takes a
+single spatial mask image.
+
+```bash
+python examples/inference_pwp_stage1_batch.py \
+  --checkpoint-path /models/cosmos3-nano-pwp-stage1-iter2000 \
+  --method inference_pwp_stage1 \
+  --data-root /data/driving_dataset \
+  --output-dir /outputs/pwp_stage1_iter2000 \
+  --mask-path /data/mask_pool/mask_common_1024x512.png \
+  --num-frames 93 \
+  --resolution 1024x512 \
+  --num-steps 35 \
+  --shift 5 \
+  --seed 0 \
+  --resume \
+  --dump-inputs \
+  --no-guardrails
+```
+
+Use `--dry-run` to validate all RGB/PCD/prompt pairs without loading the
+checkpoint. Each completed sample is written to
+`<output-dir>/<stem>_<checkpoint>_<method>.mp4`; `--resume` skips an existing
+non-empty video. For example:
+`scene_iter_000002000_bf16_inference_pwp_stage1.mp4`. The batch summary and
+manifest are written at the output root. Per-sample metadata and the
+`--dump-inputs` artifacts are written under
+`<output-dir>/metadata/<stem>_<checkpoint>_<method>/`. The progress bar reports
+sample completion and the current sample. The current supported method is
+`inference_pwp_stage1.py` (also accepted as `pwp_stage1`); `--method` selects
+the implementation label and dispatch, rather than executing an arbitrary
+Python file.
+
 Cosmos3-Nano is the 16B unified reasoner/generator model. The recipe updates
 only `moe_gen`, `time_embedder`, `vae2llm`, and `llm2vae`; the reasoning tower
 is frozen. This is generator-only training, not LoRA and not full fine-tuning.
