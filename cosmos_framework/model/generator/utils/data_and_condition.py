@@ -67,6 +67,10 @@ class GenerationDataClean:
     # None for non-transfer or single-control samples.
     control_weights: list[list[float]] | None = None
 
+    # Optional per-sample pixel-validity masks for target-loss-masked training.
+    # Each tensor is [1,T,H,W], where 1 means the RGB target is valid.
+    target_loss_mask: list[torch.Tensor] | None = None
+
 
 @dataclass(slots=True)
 class GenerationDataNoised:
@@ -82,6 +86,9 @@ class GenerationDataNoised:
     xt_tokens_vision: torch.Tensor  # tokens added with noise level t per flow-matching formulation
     vt_target_vision: torch.Tensor  # gt rectified flow field
     sigmas_vision: torch.Tensor | None = None  # SNR to add to the vision tokens
+    # Flat vision-item list aligned with vt_target_vision. Controls carry None;
+    # the generated RGB target carries [1,T_latent,H_latent,W_latent].
+    target_loss_mask_vision: list[torch.Tensor | None] | None = None
 
     # LiDAR
     epsilon_lidar: torch.Tensor | None = None
