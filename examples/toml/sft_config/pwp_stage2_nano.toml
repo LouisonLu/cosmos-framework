@@ -63,7 +63,6 @@ max_iter                = 2000
 [checkpoint]
 keys_to_skip_loading = ["net_ema."]
 load_path            = "${oc.env:PWP_STAGE2_CHECKPOINT_PATH}"
-load_training_state  = false
 save_iter            = 250
 
 [dataloader_train]

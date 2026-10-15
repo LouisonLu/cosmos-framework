@@ -45,6 +45,7 @@ pwp_stage2_nano.trainer.grad_accum_iter = 1
 pwp_stage2_nano.trainer.max_iter = 2000
 pwp_stage2_nano.checkpoint.load_path = "${oc.env:PWP_STAGE2_CHECKPOINT_PATH}"
 pwp_stage2_nano.checkpoint.load_training_state = False
+pwp_stage2_nano.checkpoint.strict_resume = False
 pwp_stage2_nano.checkpoint.save_iter = 250
 
 pwp_stage2_nano.dataloader_train = L(PackingDataLoader)(
