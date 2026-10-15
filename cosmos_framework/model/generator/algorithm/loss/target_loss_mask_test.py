@@ -42,3 +42,29 @@ def test_target_loss_mask_excludes_black_regions_from_numerator_and_denominator(
     # only the one valid target element, so the loss is exactly 1.
     torch.testing.assert_close(weighted, torch.tensor(1.0))
     torch.testing.assert_close(per_instance, torch.tensor([1.0]))
+
+
+@pytest.mark.L0
+def test_target_loss_mask_supports_batched_vision_latents() -> None:
+    # Cosmos3 keeps a singleton batch dimension on each vision latent:
+    # [B,C,T,H,W]. Both channels contribute to the valid first cell, while the
+    # black cell must be excluded from the numerator and denominator.
+    pred = [torch.tensor([[[[[1.0, 100.0]]], [[[2.0, 200.0]]]]])]
+    target = [torch.zeros_like(pred[0])]
+    condition_mask = [torch.zeros(1, 1, 1)]
+    target_loss_mask = [torch.tensor([[[[1.0, 0.0]]]])]
+
+    weighted, per_instance = compute_flow_matching_loss(
+        pred=pred,
+        target=target,
+        condition_mask=condition_mask,
+        timesteps=torch.zeros(1, 1),
+        has_valid_tokens=True,
+        rectified_flow=_UnitWeightFlow(),
+        tensor_kwargs_fp32={"dtype": torch.float32},
+        target_loss_mask=target_loss_mask,
+    )
+
+    # (1^2 + 2^2) / 2 valid channel elements.
+    torch.testing.assert_close(weighted, torch.tensor(2.5))
+    torch.testing.assert_close(per_instance, torch.tensor([2.5]))
