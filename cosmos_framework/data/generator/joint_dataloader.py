@@ -171,6 +171,9 @@ def custom_collate_fn(batch: list[dict[str, Any]] | dict[str, Any]) -> dict[str,
         "image_size",
         "action_processing_record",
         "camera_geometry",
+        # Per-sample pixel validity masks stay ragged here and are converted to
+        # latent masks by the Stage 2 model after the CP payload is assembled.
+        "target_loss_mask",
         # Like "video": a per-sample list of range clips, which default_collate would try to
         # stack even though the two sensors' clips differ in length and resolution.
         "lidar",

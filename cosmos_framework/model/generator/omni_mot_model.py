@@ -33,6 +33,7 @@ from cosmos_framework.model.generator.algorithm.loss.flow_matching import (
     ActionSlotLossStats,
     compute_flow_matching_loss,
 )
+from cosmos_framework.model.generator.algorithm.loss.target_loss_mask import build_latent_valid_mask
 from cosmos_framework.model.generator.algorithm.loss.load_balancing import compute_load_balancing_loss
 from cosmos_framework.configs.base.defaults.joint_attention import JointAttnImplementation
 from cosmos_framework.configs.base.defaults.model_config import OmniMoTModelConfig
@@ -1753,6 +1754,7 @@ class OmniMoTModel(ImaginaireModel):
                 has_valid_tokens=has_noisy_tokens(data_batch_packed.vision),
                 rectified_flow=rectified_flow_vision,
                 tensor_kwargs_fp32=self.tensor_kwargs_fp32,
+                target_loss_mask=gen_data_noised.target_loss_mask_vision,
                 normalize_by_active=normalize_by_active,
                 exclude_fully_conditioned_items=exclude_fully_conditioned_items,
             )
@@ -2203,6 +2205,68 @@ class OmniMoTModel(ImaginaireModel):
         timesteps = sigmas * max_timestep  # [B,1]
         return timesteps, sigmas
 
+    @staticmethod
+    def _build_target_loss_mask_vision(
+        pixel_masks: list[torch.Tensor] | None,
+        x0_vision: list[torch.Tensor],
+        num_vision_items_per_sample: list[int] | None,
+    ) -> list[torch.Tensor | None] | None:
+        """Convert per-sample pixel masks to the flat vision-item layout.
+
+        PwP Stage 2 emits three vision items per sample. The first RGB image
+        and full PCD are controls, so only the final masked RGB item receives
+        a latent validity mask. Controls use ``None`` and retain the existing
+        clean-control loss behavior.
+        """
+        if pixel_masks is None:
+            return None
+        if num_vision_items_per_sample is None:
+            if len(pixel_masks) != len(x0_vision):
+                raise ValueError(
+                    "target_loss_mask must align with one vision item per sample: "
+                    f"got {len(pixel_masks)} masks and {len(x0_vision)} vision items"
+                )
+            return [
+                build_latent_valid_mask(
+                    mask,
+                    latent.shape[-3:],
+                    spatial_guard_px=8,
+                    temporal_guard_frames=1,
+                    min_valid_ratio=0.01,
+                )
+                for mask, latent in zip(pixel_masks, x0_vision, strict=True)
+            ]
+
+        if len(pixel_masks) != len(num_vision_items_per_sample):
+            raise ValueError(
+                "target_loss_mask must align with samples: "
+                f"got {len(pixel_masks)} masks and {len(num_vision_items_per_sample)} sample plans"
+            )
+        if sum(num_vision_items_per_sample) != len(x0_vision):
+            raise ValueError(
+                "Vision-item count does not match sample plans: "
+                f"plans={sum(num_vision_items_per_sample)} items={len(x0_vision)}"
+            )
+
+        masks: list[torch.Tensor | None] = []
+        offset = 0
+        for pixel_mask, item_count in zip(pixel_masks, num_vision_items_per_sample, strict=True):
+            if item_count < 1:
+                raise ValueError("Every masked Stage 2 sample must contain a target vision item")
+            target_index = offset + item_count - 1
+            masks.extend([None] * (item_count - 1))
+            masks.append(
+                build_latent_valid_mask(
+                    pixel_mask,
+                    x0_vision[target_index].shape[-3:],
+                    spatial_guard_px=8,
+                    temporal_guard_frames=1,
+                    min_valid_ratio=0.01,
+                )
+            )
+            offset += item_count
+        return masks
+
     def _add_noise_to_input(
         self,
         gen_data_clean: GenerationDataClean,
@@ -2291,6 +2355,12 @@ class OmniMoTModel(ImaginaireModel):
         xt_vision = [
             xt_vision_i.to(**self.tensor_kwargs) for xt_vision_i in xt_vision
         ]  # list of [C,T,H,W]; to make tensor compatible with the precision of the model
+
+        target_loss_mask_vision = self._build_target_loss_mask_vision(
+            gen_data_clean.target_loss_mask,
+            x0_vision,
+            gen_data_clean.num_vision_items_per_sample,
+        )
 
         # LiDAR: same rectified flow as video, on its own grid latents.
         x0_lidar = gen_data_clean.x0_tokens_lidar  # list of [C,T,H,W]
@@ -2419,6 +2489,7 @@ class OmniMoTModel(ImaginaireModel):
             xt_tokens_vision=xt_vision,
             vt_target_vision=vt_vision,
             sigmas_vision=sigmas_vision,
+            target_loss_mask_vision=target_loss_mask_vision,
             # lidar
             epsilon_lidar=epsilon_lidar,
             xt_tokens_lidar=xt_lidar,
@@ -5031,6 +5102,7 @@ class OmniMoTModel(ImaginaireModel):
             raw_action_dim=raw_action_dim,
             action_valid_mask=action_valid_mask,
             control_weights=control_weights,
+            target_loss_mask=data_batch.get("target_loss_mask", None),
         )
 
     def _has_vision_stream(self, data_batch: dict[str, Any]) -> bool:

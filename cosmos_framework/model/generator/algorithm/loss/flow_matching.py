@@ -42,6 +42,7 @@ def compute_flow_matching_loss(
     tensor_kwargs_fp32: dict,
     raw_action_dim: list[torch.Tensor] | None = None,
     action_valid_mask: list[torch.Tensor] | None = None,
+    target_loss_mask: list[torch.Tensor | None] | None = None,
     normalize_by_active: bool = False,
     exclude_fully_conditioned_items: bool = False,
     action_slot_stats: ActionSlotLossStats | None = None,
@@ -65,6 +66,10 @@ def compute_flow_matching_loss(
         raw_action_dim: Optional unpadded Action width for each sample.
         action_valid_mask: Optional per-sample channel-validity masks. Invalid
             action channels are excluded from both numerator and denominator.
+        target_loss_mask: Optional list aligned with ``pred``. A ``[1,T,H,W]``
+            mask applies only to the RGB target item; black cells contribute
+            zero to both the numerator and denominator. ``None`` leaves the
+            legacy loss unchanged (used for clean control items).
         normalize_by_active: When True, normalize per-instance loss by the count of
             active (noisy) elements rather than all elements. Preserves the
             ``sum / active_count`` semantics needed for distillation critics where
@@ -87,6 +92,12 @@ def compute_flow_matching_loss(
         dummy_loss = 0.0 * sum(p.sum() for p in pred)
         return dummy_loss, dummy_loss.unsqueeze(0)  # make per-instance loss 1-D
 
+    if target_loss_mask is not None and len(target_loss_mask) != len(pred):
+        raise ValueError(
+            "target_loss_mask must align with pred: "
+            f"got {len(target_loss_mask)} masks for {len(pred)} predictions"
+        )
+
     # condition_mask[i] is T-first with trailing singletons: [T,1,1] vision, [T,1] action.
     # tw_i gets the same shape so w(σ_t) broadcasts element-wise over non-T dims.
     per_instance_losses = []
@@ -97,6 +108,26 @@ def compute_flow_matching_loss(
         sqerr_i = (pred[i] - target[i]) ** 2  # vision:[C,T,H,W]  action/sound:[T,D]
         noisy_mask_i = 1.0 - condition_mask[i]  # vision:[T,1,1]  action/sound:[T,1]
         has_noisy_items.append(torch.any(noisy_mask_i != 0))  # []
+        target_mask_i = None if target_loss_mask is None else target_loss_mask[i]
+        masked_target_count = None
+        if target_mask_i is not None:
+            if sqerr_i.ndim != 4:
+                raise ValueError("target_loss_mask is supported only for vision tensors shaped [C,T,H,W]")
+            if target_mask_i.ndim != 4 or target_mask_i.shape[0] != 1:
+                raise ValueError(
+                    "target_loss_mask entries must have shape [1,T,H,W], "
+                    f"got {tuple(target_mask_i.shape)}"
+                )
+            target_mask_i = target_mask_i.to(device=sqerr_i.device, dtype=sqerr_i.dtype).squeeze(0)
+            expected_shape = tuple(sqerr_i.shape[1:])
+            if tuple(target_mask_i.shape) != expected_shape:
+                raise ValueError(
+                    "target_loss_mask spatial/temporal shape must match prediction: "
+                    f"mask={tuple(target_mask_i.shape)} prediction={expected_shape}"
+                )
+            masked_target_count = (noisy_mask_i * target_mask_i).sum() * sqerr_i.shape[0]
+            if masked_target_count.item() <= 0:
+                raise ValueError("target_loss_mask has no valid noisy target elements")
         if raw_action_dim is not None and raw_action_dim[i] is not None:
             sqerr_i = sqerr_i[:, : raw_action_dim[i]]
         slot_mask_i = None
@@ -106,7 +137,10 @@ def compute_flow_matching_loss(
                 raise ValueError(f"action_valid_mask width {slot_mask_i.shape[-1]} < action width {sqerr_i.shape[-1]}")
             slot_mask_i = slot_mask_i[:, : sqerr_i.shape[-1]]
             sqerr_i = sqerr_i * slot_mask_i
-        if normalize_by_active:
+        if masked_target_count is not None:
+            valid_target = noisy_mask_i * target_mask_i
+            per_instance_losses.append((sqerr_i * valid_target).sum() / masked_target_count)
+        elif normalize_by_active:
             active_channels = slot_mask_i.sum() if slot_mask_i is not None else sqerr_i.numel() // noisy_mask_i.numel()
             active_count = (noisy_mask_i.sum() * active_channels).clamp(min=1)
             per_instance_losses.append((sqerr_i * noisy_mask_i).sum() / active_count)  # []
@@ -123,7 +157,10 @@ def compute_flow_matching_loss(
         tw_i = rectified_flow.train_time_weight(ts_i, tensor_kwargs_fp32)  # DF:[T_i]  TF:[1]
         tw_i = tw_i.reshape(-1, *([1] * (condition_mask[i].ndim - 1)))  # vision:[T_i,1,1]  action/sound:[T_i,1]
         weighted_sqerr_i = sqerr_i * tw_i * noisy_mask_i
-        if normalize_by_active or slot_mask_i is not None:
+        if masked_target_count is not None:
+            weighted_sqerr_i = weighted_sqerr_i * target_mask_i
+            per_instance_weighted_losses.append(weighted_sqerr_i.sum() / masked_target_count)
+        elif normalize_by_active or slot_mask_i is not None:
             per_instance_weighted_losses.append(weighted_sqerr_i.sum() / active_count)
         else:
             per_instance_weighted_losses.append(weighted_sqerr_i.mean())

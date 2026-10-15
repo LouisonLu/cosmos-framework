@@ -11,8 +11,8 @@ The first two items are automatically treated as controls by the Cosmos3
 sequence packer.  The last item has an empty conditioning-frame list,
 so its complete RGB target latent is used by the standard flow-matching loss.
 The same spatial mask is applied to every PCD frame; no mask is applied to the
-RGB target.
-No target-validity mask is emitted; that belongs to the future Stage2 pipeline.
+RGB target. The independent PwP Stage2 dataset adds per-video target-loss
+masks when masked RGB targets are required.
 """
 
 from __future__ import annotations
