@@ -105,27 +105,34 @@ def compute_flow_matching_loss(
     has_noisy_items: list[torch.Tensor] = []
     for i in range(len(pred)):
         T_i = condition_mask[i].shape[0]
-        sqerr_i = (pred[i] - target[i]) ** 2  # vision:[C,T,H,W]  action/sound:[T,D]
+        sqerr_i = (pred[i] - target[i]) ** 2  # vision:[B,C,T,H,W] or [C,T,H,W], action/sound:[T,D]
         noisy_mask_i = 1.0 - condition_mask[i]  # vision:[T,1,1]  action/sound:[T,1]
         has_noisy_items.append(torch.any(noisy_mask_i != 0))  # []
         target_mask_i = None if target_loss_mask is None else target_loss_mask[i]
         masked_target_count = None
         if target_mask_i is not None:
-            if sqerr_i.ndim != 4:
-                raise ValueError("target_loss_mask is supported only for vision tensors shaped [C,T,H,W]")
+            if sqerr_i.ndim not in (4, 5):
+                raise ValueError(
+                    "target_loss_mask is supported only for vision tensors shaped "
+                    "[C,T,H,W] or [B,C,T,H,W]"
+                )
             if target_mask_i.ndim != 4 or target_mask_i.shape[0] != 1:
                 raise ValueError(
                     "target_loss_mask entries must have shape [1,T,H,W], "
                     f"got {tuple(target_mask_i.shape)}"
                 )
-            target_mask_i = target_mask_i.to(device=sqerr_i.device, dtype=sqerr_i.dtype).squeeze(0)
-            expected_shape = tuple(sqerr_i.shape[1:])
-            if tuple(target_mask_i.shape) != expected_shape:
+            target_mask_i = target_mask_i.to(device=sqerr_i.device, dtype=sqerr_i.dtype)
+            expected_shape = tuple(sqerr_i.shape[-3:])
+            if tuple(target_mask_i.shape[1:]) != expected_shape:
                 raise ValueError(
                     "target_loss_mask spatial/temporal shape must match prediction: "
-                    f"mask={tuple(target_mask_i.shape)} prediction={expected_shape}"
+                    f"mask={tuple(target_mask_i.shape[1:])} prediction={expected_shape}"
                 )
-            masked_target_count = (noisy_mask_i * target_mask_i).sum() * sqerr_i.shape[0]
+            # The mask covers T/H/W; every leading prediction dimension (C for
+            # 4D latents, or B*C for Cosmos3 5D latents) contributes one loss
+            # element for each valid spatiotemporal cell.
+            elements_per_mask_cell = sqerr_i.numel() // target_mask_i.numel()
+            masked_target_count = (noisy_mask_i * target_mask_i).sum() * elements_per_mask_cell
             if masked_target_count.item() <= 0:
                 raise ValueError("target_loss_mask has no valid noisy target elements")
         if raw_action_dim is not None and raw_action_dim[i] is not None:
