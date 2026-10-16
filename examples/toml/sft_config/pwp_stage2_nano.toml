@@ -47,7 +47,9 @@ lr             = 1.0e-4
 weight_decay   = 0
 
 [scheduler]
-cycle_lengths      = [1000]
+# Match the recipe's 2000-step default. Shorter runs override this explicitly
+# (for example scheduler.cycle_lengths=[1120]).
+cycle_lengths      = [2000]
 f_max              = [1.0]
 f_min              = [0.0]
 f_start            = [0.0]
