@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Independent inference input builder for the Cosmos3 PwP Stage1 recipe.
+"""Shared no-video-path input builder for Cosmos3 PwP training and inference.
 
-Stage1 is a three-item vision sample:
+The generated sample uses a three-item vision contract:
 
-    [masked first-frame RGB, masked PCD control video, generated RGB video]
+    [masked first-frame RGB, PCD control video, generated RGB video]
 
 The first two items are clean controls and the last item is the only generated
-item.  This module deliberately mirrors ``pwp_stage1_dataset.py`` instead of
-using the stock one-video ``get_sample_data`` helper.
+item. This module follows the shared training sample-packing contract rather
+than using the stock one-video ``get_sample_data`` helper.
 """
 
 from __future__ import annotations
@@ -37,8 +37,8 @@ from cosmos_framework.inference.structured_caption import caption_json_to_prompt
 
 
 @dataclass(frozen=True)
-class PwPStage1PreparedInputs:
-    """Decoded media kept alongside the inference batch for optional hardlock."""
+class PwPNanoPreparedInputs:
+    """Decoded media kept alongside the batch for frame-0 hardlock compositing."""
 
     batch: dict[str, Any]
     first_frame: np.ndarray
@@ -82,7 +82,7 @@ def decode_image(path: str | Path, *, height: int, width: int) -> np.ndarray:
         return np.asarray(image, dtype=np.uint8)
 
 
-def build_pwp_stage1_batch(
+def build_pwp_nano_inference_batch(
     *,
     first_frame: np.ndarray | None = None,
     pcd_frames: np.ndarray,
@@ -94,7 +94,7 @@ def build_pwp_stage1_batch(
     mask_fill_value: int = 0,
     temporal_position_groups: list[int | None] | None = None,
 ) -> dict[str, Any]:
-    """Build the flattened multi-vision batch expected by inference.
+    """Build the flattened batch while preserving the full PCD control video.
 
     ``first_frame`` and ``pcd_frames`` are already aligned and resized.  The
     generated third item is a zero placeholder: with an empty vision
@@ -118,12 +118,11 @@ def build_pwp_stage1_batch(
         raise ValueError("Prompt must not be empty")
 
     masked_first = apply_keep_mask(first_frame, keep_mask, mask_fill_value)
-    masked_pcd = apply_keep_mask(pcd_frames, keep_mask, mask_fill_value)
     generated_placeholder = np.zeros_like(pcd_frames)
 
     tensors = [
         normalize_frames(masked_first),
-        normalize_frames(masked_pcd),
+        normalize_frames(pcd_frames),
         normalize_frames(generated_placeholder),
     ]
     height, width = first_frame.shape[1:3]
@@ -137,7 +136,7 @@ def build_pwp_stage1_batch(
     # flattens it before reaching the model.
     video = [tensor.unsqueeze(0).to(device=device) for tensor in tensors]
     return {
-        "dataset_name": "pwp_stage1_inference",
+        "dataset_name": "cosmos3_pwp_nano_inference",
         "video": video,
         "image_size": [size, size.clone(), size.clone()],
         "num_vision_items_per_sample": [3],
@@ -173,7 +172,7 @@ def load_prompt(path: str | Path) -> str:
     return caption_json_to_prompt(raw) if isinstance(raw, dict) else str(raw).strip()
 
 
-def load_pwp_stage1_inputs(
+def load_pwp_nano_inference_inputs(
     *,
     first_frame_path: str | Path,
     pcd_path: str | Path,
@@ -189,12 +188,11 @@ def load_pwp_stage1_inputs(
     fps: float | None = None,
     device: str | torch.device = "cuda",
     mask_fill_value: int = 0,
-) -> PwPStage1PreparedInputs:
-    """Decode, align, mask, and package one Stage1 inference sample.
+) -> PwPNanoPreparedInputs:
+    """Decode, align, mask, and package one full-PCD inference sample.
 
-    Unlike the generic video-to-video route, this function needs no RGB video:
-    the PCD video supplies the generated clip length and the RGB input is one
-    first-frame image.
+    Unlike the generic video-to-video route, the RGB video is used only as the
+    source of frame zero; the PCD video supplies generated clip length.
     """
     first_frame = decode_image(first_frame_path, height=height, width=width)
     pcd_all, pcd_info = decode_video(pcd_path, height=height, width=width)
@@ -219,7 +217,7 @@ def load_pwp_stage1_inputs(
         keep_mask = resize_keep_mask(raw_mask, height, width)
 
     effective_fps = float(pcd_info["fps"] if fps is None else fps)
-    batch = build_pwp_stage1_batch(
+    batch = build_pwp_nano_inference_batch(
         first_frame=first_frame,
         pcd_frames=pcd,
         keep_mask=keep_mask,
@@ -229,7 +227,7 @@ def load_pwp_stage1_inputs(
         device=device,
         mask_fill_value=mask_fill_value,
     )
-    return PwPStage1PreparedInputs(
+    return PwPNanoPreparedInputs(
         batch=batch,
         first_frame=first_frame,
         pcd_frames=pcd,
@@ -238,28 +236,3 @@ def load_pwp_stage1_inputs(
         height=height,
         width=width,
     )
-
-
-def hardlock_first_frame(
-    decoded_video: torch.Tensor,
-    *,
-    rgb_first_frame: np.ndarray,
-    keep_mask: np.ndarray,
-) -> torch.Tensor:
-    """Blend the original RGB into the white keep region of decoded frame zero.
-
-    This is the decode-space counterpart of Cosmos2.5's first-frame hardlock;
-    it is intentionally optional because it is not a Cosmos3 latent-space
-    condition mask.
-    """
-    if decoded_video.ndim != 5 or decoded_video.shape[0] != 1:
-        raise ValueError(f"Expected decoded video [1,3,T,H,W], got {tuple(decoded_video.shape)}")
-    if rgb_first_frame.shape != (*keep_mask.shape, 3):
-        raise ValueError("rgb_first_frame and keep_mask shapes do not match")
-    reference = torch.from_numpy(np.ascontiguousarray(rgb_first_frame)).float().permute(2, 0, 1) / 255.0
-    reference = reference.to(device=decoded_video.device, dtype=decoded_video.dtype).unsqueeze(0)
-    mask = torch.from_numpy(np.ascontiguousarray(keep_mask)).to(device=decoded_video.device)
-    mask = mask.to(dtype=decoded_video.dtype).view(1, 1, *keep_mask.shape)
-    output = decoded_video.clone()
-    output[:, :, 0] = mask * reference + (1.0 - mask) * output[:, :, 0]
-    return output

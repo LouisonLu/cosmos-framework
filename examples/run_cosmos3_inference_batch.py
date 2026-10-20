@@ -1,14 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Batch Cosmos3 PwP Stage1 inference with one checkpoint load.
+"""Batch Cosmos3 no-video-path inference with full PCD control.
 
-The input contract matches ``inference_pwp_stage1.py`` for every sample:
+Every sample uses the same contract, regardless of checkpoint or method:
 
-    masked first RGB + masked PCD control + prompt + generated zero placeholder
+    masked first RGB + full PCD control + prompt + generated zero placeholder
 
 The full RGB video is used only to extract frame 0. It is never passed to the
-model as a conditioning video or target during inference.
+model as a conditioning video or target during inference. ``--method`` only
+changes the post-sampling decode/hardlock step.
+
+Expected layout under ``--data-root`` (``--layout directories``)::
+
+    rgb_videos/<stem>.mp4
+    pcd_videos/<stem>_pcd.mp4
+    prompts/<stem>_prompt.json
+    mask/<stem>_mask.(mp4|png)      # optional; mask_videos/ is also accepted
 """
 
 from __future__ import annotations
@@ -28,21 +36,31 @@ init_script()
 
 from cosmos_framework.inference.args import OmniSetupOverrides
 from cosmos_framework.inference.inference import OmniInference
-from cosmos_framework.inference.pwp_stage1_batch import (
-    PwPStage1BatchResult,
+from cosmos_framework.inference.pwp_nano_inference_batch import (
+    DEFAULT_INFERENCE_METHOD,
+    INFERENCE_METHODS,
+    PwPNanoInferenceBatchResult,
     build_output_filename,
     discover_samples,
     filename_component,
     generate_sample,
+    resolve_inference_method,
     sample_to_dict,
+    select_sample_range,
 )
 from cosmos_framework.utils import log
 
 
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Show defaults while keeping the docstring layout and method list readable."""
+
+
 def parse_args() -> argparse.Namespace:
+    methods_help = "\n".join(f"  {name}: {method.description}" for name, method in INFERENCE_METHODS.items())
     parser = argparse.ArgumentParser(
         description=__doc__,
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=f"inference methods:\n{methods_help}",
+        formatter_class=_HelpFormatter,
     )
     parser.add_argument("--checkpoint-path", required=True)
     parser.add_argument(
@@ -54,8 +72,13 @@ def parse_args() -> argparse.Namespace:
         "--method",
         "--inference-script",
         dest="method",
-        default="inference_pwp_stage1",
-        help="Inference method/script label. Supported aliases: inference_pwp_stage1.py, pwp_stage1",
+        default=DEFAULT_INFERENCE_METHOD,
+        help="Inference method (see the list below). Cosmos2.5 script names are accepted as aliases.",
+    )
+    parser.add_argument(
+        "--output-tag",
+        default=None,
+        help="Optional full filename suffix before .mp4; stem is prepended with a double underscore",
     )
     parser.add_argument("--data-root", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -65,11 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rgb-dir", default="rgb_videos")
     parser.add_argument("--pcd-dir", default="pcd_videos")
     parser.add_argument("--prompt-dir", default="prompts")
-    parser.add_argument("--mask-dir", default="mask_videos")
+    parser.add_argument("--mask-dir", default="mask")
     parser.add_argument("--pcd-suffix", default="_pcd")
     parser.add_argument("--prompt-suffix", default="_prompt")
     parser.add_argument("--mask-suffix", default="_mask")
     parser.add_argument("--mask-path", type=Path, default=None, help="One common PNG mask for every sample")
+    parser.add_argument("--require-mask", action="store_true", help="Fail if any sample has no paired mask")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--resume", action="store_true")
@@ -92,12 +116,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shift", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--mask-fill-value", type=int, default=0)
-    hardlock = parser.add_mutually_exclusive_group()
-    hardlock.add_argument("--hardlock-first-frame", dest="hardlock_first_frame", action="store_true")
-    hardlock.add_argument("--no-hardlock-first-frame", dest="hardlock_first_frame", action="store_false")
+    parser.add_argument(
+        "--hardlock-erode-px",
+        type=int,
+        default=8,
+        help="Erode only the frame-0 post-decode hardlock keep region (Cosmos2.5 default: 8); model inputs stay unchanged",
+    )
     parser.add_argument("--no-guardrails", action="store_true")
     parser.add_argument("--no-ema-weights", dest="use_ema_weights", action="store_false")
-    parser.set_defaults(hardlock_first_frame=True, use_ema_weights=True)
+    parser.set_defaults(use_ema_weights=True)
     return parser.parse_args()
 
 
@@ -113,31 +140,18 @@ def parse_resolution(value: str | None, *, width: int, height: int) -> tuple[int
     return parsed_width, parsed_height
 
 
-def resolve_method(value: str) -> str:
-    """Resolve the current Cosmos3 batch method without executing arbitrary code."""
-
-    method = filename_component(value)
-    aliases = {
-        "pwp_stage1": "inference_pwp_stage1",
-        "inference_pwp_stage1": "inference_pwp_stage1",
-    }
-    try:
-        return aliases[method]
-    except KeyError as error:
-        raise ValueError(
-            "Unsupported --method. Current batch implementation supports "
-            "inference_pwp_stage1.py (aliases: inference_pwp_stage1, pwp_stage1)."
-        ) from error
-
-
 @torch.no_grad()
 def run(args: argparse.Namespace) -> int:
     output_dir = args.output_dir.expanduser().absolute()
     output_dir.mkdir(parents=True, exist_ok=True)
     width, height = parse_resolution(args.resolution, width=args.width, height=args.height)
-    method_label = resolve_method(args.method)
+    method = resolve_inference_method(args.method)
+    method_label = method.name
     checkpoint_label = filename_component(args.checkpoint_label or args.checkpoint_path)
+    filename_method = method_label
 
+    if args.hardlock_erode_px < 0:
+        raise ValueError("hardlock-erode-px must be non-negative")
     samples = discover_samples(
         args.data_root,
         layout=args.layout,
@@ -149,19 +163,18 @@ def run(args: argparse.Namespace) -> int:
         prompt_suffix=args.prompt_suffix,
         mask_suffix=args.mask_suffix,
         common_mask=args.mask_path,
-        limit=args.limit,
+        require_mask=args.require_mask,
     )
-    if args.start_index < 0 or args.start_index >= len(samples):
-        raise ValueError(f"start-index {args.start_index} is outside {len(samples)} samples")
-    samples = samples[args.start_index :]
+    samples = select_sample_range(samples, args.start_index, args.limit)
 
-    manifest_path = output_dir / "pwp_stage1_batch_manifest.json"
+    batch_name = method_label.removeprefix("inference_")
+    manifest_path = output_dir / f"{batch_name}_batch_manifest.json"
     manifest_path.write_text(
         json.dumps([sample_to_dict(sample) for sample in samples], indent=2) + "\n",
         encoding="utf-8",
     )
     if args.dry_run:
-        print(f"Validated {len(samples)} Cosmos3 PwP Stage1 sample(s).")
+        print(f"Validated {len(samples)} Cosmos3 PwP sample(s) for {method_label} ({method.description}).")
         print(f"Manifest: {manifest_path}")
         for sample in samples:
             print(f"{sample.stem}: rgb={sample.rgb_path} pcd={sample.pcd_path} mask={sample.mask_path}")
@@ -184,22 +197,28 @@ def run(args: argparse.Namespace) -> int:
     setup_args = OmniSetupOverrides(**setup_kwargs).build_setup()
     pipe = OmniInference.create(setup_args)
 
-    results: list[PwPStage1BatchResult] = []
+    results: list[PwPNanoInferenceBatchResult] = []
+    log.info(f"Inference method: {method_label} ({method.description})")
     with tqdm(
         samples,
-        desc=f"{checkpoint_label}/{method_label}",
+        desc=f"{checkpoint_label}/{filename_method}",
         unit="sample",
         dynamic_ncols=True,
     ) as progress:
         for index, sample in enumerate(progress):
-            output_filename = build_output_filename(sample.stem, checkpoint_label, method_label)
+            output_filename = build_output_filename(
+                sample.stem,
+                checkpoint_label,
+                filename_method,
+                output_tag=args.output_tag,
+            )
             output_path = output_dir / output_filename
             sample_output_dir = output_dir / "metadata" / Path(output_filename).stem
             sample_work_dir = output_dir / "_work" / Path(output_filename).stem
             progress.set_postfix(sample=sample.stem[:32], status="running")
             if args.resume and output_path.is_file() and output_path.stat().st_size > 0:
                 log.info(f"Skipping existing sample {index + 1}/{len(samples)}: {sample.stem}")
-                results.append(PwPStage1BatchResult(sample.stem, "skipped", str(output_path)))
+                results.append(PwPNanoInferenceBatchResult(sample.stem, "skipped", str(output_path)))
                 progress.set_postfix(sample=sample.stem[:32], status="skipped")
                 continue
 
@@ -209,6 +228,7 @@ def run(args: argparse.Namespace) -> int:
                 output_path = generate_sample(
                     pipe,
                     sample,
+                    method=method,
                     output_dir=sample_output_dir,
                     output_path=output_path,
                     work_dir=sample_work_dir,
@@ -223,7 +243,7 @@ def run(args: argparse.Namespace) -> int:
                     guidance=args.guidance,
                     shift=args.shift,
                     mask_fill_value=args.mask_fill_value,
-                    hardlock_first_frame_enabled=args.hardlock_first_frame,
+                    hardlock_erode_px=args.hardlock_erode_px,
                     use_ema_weights=args.use_ema_weights,
                     dump_inputs=args.dump_inputs,
                     ffmpeg_bin=args.ffmpeg_bin,
@@ -231,16 +251,16 @@ def run(args: argparse.Namespace) -> int:
             except Exception as error:  # noqa: BLE001 - record the sample before aborting the batch.
                 elapsed = time.monotonic() - started
                 log.exception(f"Sample failed after {elapsed:.1f}s: {sample.stem}")
-                results.append(PwPStage1BatchResult(sample.stem, "failed", error=str(error)))
+                results.append(PwPNanoInferenceBatchResult(sample.stem, "failed", error=str(error)))
                 progress.set_postfix(sample=sample.stem[:32], status="failed")
                 break
             else:
                 elapsed = time.monotonic() - started
                 log.success(f"Saved {output_path} in {elapsed:.1f}s")
-                results.append(PwPStage1BatchResult(sample.stem, "completed", str(output_path)))
+                results.append(PwPNanoInferenceBatchResult(sample.stem, "completed", str(output_path)))
                 progress.set_postfix(sample=sample.stem[:32], status="completed")
 
-    summary_path = output_dir / "pwp_stage1_batch_summary.json"
+    summary_path = output_dir / f"{batch_name}_batch_summary.json"
     summary_path.write_text(
         json.dumps(
             {
