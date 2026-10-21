@@ -192,7 +192,11 @@ def _apply_spatial_vision_hardlock_mask(
     condition_reference: list[torch.Tensor],
     condition_mask: list[torch.Tensor],
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-    """Apply a frame-0 spatial keep mask to the final generated vision item."""
+    """Apply a frame-0 spatial keep mask to the final generated vision item.
+
+    Cosmos3 vision latents are normally ``[B,C,T,H,W]``; ``[C,T,H,W]`` remains
+    accepted for callers and tests that already remove the singleton batch axis.
+    """
     if isinstance(temporal_mask, torch.Tensor):
         if temporal_mask.ndim == 3:
             sample_masks = [temporal_mask]
@@ -234,19 +238,33 @@ def _apply_spatial_vision_hardlock_mask(
         source = vision_latents[vision_item_start]
         target_index = vision_item_start + num_items - 1
         target = vision_latents[target_index]
-        if source.ndim != 4 or target.ndim != 4 or source.shape[1] != 1:
-            raise ValueError("Expected a single-frame source latent and a [C,T,H,W] target latent")
-        if source.shape[0] != target.shape[0] or source.shape[-2:] != target.shape[-2:]:
+
+        def _as_cthw(latent: torch.Tensor, name: str) -> torch.Tensor:
+            if latent.ndim == 5:
+                if latent.shape[0] != 1:
+                    raise ValueError(f"{name} latent must have batch size 1, got shape {tuple(latent.shape)}")
+                return latent[0]
+            if latent.ndim == 4:
+                return latent
+            raise ValueError(f"{name} latent must have shape [1,C,T,H,W] or [C,T,H,W], got {tuple(latent.shape)}")
+
+        source_cthw = _as_cthw(source, "Source")
+        target_cthw = _as_cthw(target, "Target")
+        if source_cthw.shape[1] != 1:
+            raise ValueError(f"Expected a single-frame source latent, got {source_cthw.shape[1]} frames")
+        if source_cthw.shape[0] != target_cthw.shape[0] or source_cthw.shape[-2:] != target_cthw.shape[-2:]:
             raise ValueError("Source and target latent channels/spatial dimensions must match")
 
-        keep = sample_mask[0].to(device=target.device, dtype=torch.float32)
+        keep = sample_mask[0].to(device=target_cthw.device, dtype=torch.float32)
         keep = torch.nn.functional.interpolate(
-            keep[None, None], size=target.shape[-2:], mode="bilinear", align_corners=False
+            keep[None, None], size=target_cthw.shape[-2:], mode="bilinear", align_corners=False
         )[0, 0]
         target_reference = target.clone()
-        target_reference[:, :1] = source.to(device=target.device, dtype=target.dtype)
+        target_reference_cthw = _as_cthw(target_reference, "Target reference")
+        target_reference_cthw[:, :1] = source_cthw.to(device=target_cthw.device, dtype=target_cthw.dtype)
         target_mask = torch.zeros_like(target)
-        target_mask[:, 0] = keep.to(dtype=target_mask.dtype)[None].expand(target.shape[0], -1, -1)
+        target_mask_cthw = _as_cthw(target_mask, "Target mask")
+        target_mask_cthw[:, 0] = keep.to(dtype=target_mask.dtype)[None].expand(target_cthw.shape[0], -1, -1)
 
         flat_start = sum(vision_latents[index].numel() for index in range(vision_item_start, target_index))
         flat_end = flat_start + target.numel()

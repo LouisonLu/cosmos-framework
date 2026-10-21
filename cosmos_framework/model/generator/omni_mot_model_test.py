@@ -71,7 +71,8 @@ def test_default_setup_loads_vision_tokenizer(monkeypatch: pytest.MonkeyPatch) -
     vision_tokenizer.reset_dtype.assert_called_once_with()
 
 
-def test_spatial_vision_hardlock_targets_only_frame_zero_of_generated_item() -> None:
+@pytest.mark.parametrize("add_batch_dim", [False, True])
+def test_spatial_vision_hardlock_targets_only_frame_zero_of_generated_item(add_batch_dim: bool) -> None:
     import torch
 
     from cosmos_framework.model.generator.omni_mot_model import _apply_spatial_vision_hardlock_mask
@@ -79,6 +80,8 @@ def test_spatial_vision_hardlock_targets_only_frame_zero_of_generated_item() -> 
     source = torch.tensor([[[[10.0, 20.0], [30.0, 40.0]]]])
     pcd = torch.full((1, 2, 2, 2), 99.0)
     target = torch.full((1, 2, 2, 2), -5.0)
+    if add_batch_dim:
+        source, pcd, target = source.unsqueeze(0), pcd.unsqueeze(0), target.unsqueeze(0)
     clean = SimpleNamespace(
         num_vision_items_per_sample=[3],
         x0_tokens_vision=[source, pcd, target],
@@ -102,12 +105,16 @@ def test_spatial_vision_hardlock_targets_only_frame_zero_of_generated_item() -> 
     target_mask = updated_mask[0][target_start:].reshape_as(target)
     target_noise = updated_noise[0][target_start:].reshape_as(target)
     target_reference = updated_reference[0][target_start:].reshape_as(target)
+    source_cthw = source[0] if add_batch_dim else source
+    target_mask_cthw = target_mask[0] if add_batch_dim else target_mask
+    target_noise_cthw = target_noise[0] if add_batch_dim else target_noise
+    target_reference_cthw = target_reference[0] if add_batch_dim else target_reference
 
-    assert torch.equal(target_reference[:, :1], source)
-    assert torch.all(target_mask[:, :1] == 1)
-    assert torch.all(target_mask[:, 1:] == 0)
-    assert torch.equal(target_noise[:, :1], source)
-    assert torch.all(target_noise[:, 1:] == 7)
+    assert torch.equal(target_reference_cthw[:, :1], source_cthw)
+    assert torch.all(target_mask_cthw[:, :1] == 1)
+    assert torch.all(target_mask_cthw[:, 1:] == 0)
+    assert torch.equal(target_noise_cthw[:, :1], source_cthw)
+    assert torch.all(target_noise_cthw[:, 1:] == 7)
     assert torch.all(updated_mask[0][:target_start] == 0)
 
 
