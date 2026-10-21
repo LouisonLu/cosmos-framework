@@ -33,6 +33,7 @@ def test_discover_samples_uses_common_mask_and_prompt_suffix(tmp_path: Path):
 def test_discover_samples_rejects_missing_pair(tmp_path: Path):
     _write(tmp_path / "rgb_videos" / "scene.mp4")
     _write(tmp_path / "prompts" / "scene_prompt.json", b'{"caption":"a car"}')
+    (tmp_path / "pcd_videos").mkdir()
 
     with pytest.raises(FileNotFoundError, match="PCD video"):
         discover_samples(tmp_path)
