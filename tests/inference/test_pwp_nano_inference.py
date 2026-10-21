@@ -8,7 +8,22 @@ from cosmos_framework.inference.cosmos3_no_video_path_blended_decode import (
     erode_keep_mask,
     hardlock_first_frame,
 )
-from cosmos_framework.inference.pwp_nano_inference import build_pwp_nano_inference_batch
+from cosmos_framework.inference.pwp_nano_inference import (
+    build_pwp_nano_inference_batch,
+    build_temporal_guidance_mask,
+)
+
+
+def test_temporal_guidance_mask_keeps_only_spatial_mask_at_frame_zero():
+    keep = np.zeros((3, 5), dtype=bool)
+    keep[:, :2] = True
+
+    mask = build_temporal_guidance_mask(keep, num_frames=4)
+
+    assert mask.dtype == np.bool_
+    assert mask.shape == (4, 3, 5)
+    assert np.array_equal(mask[0], keep)
+    assert not mask[1:].any()
 
 
 def test_build_pwp_nano_inference_batch_uses_three_item_contract():

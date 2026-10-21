@@ -12,9 +12,12 @@ masked RGB frame 0 + full PCD video + prompt + empty generated-RGB placeholder
 ```
 
 The source RGB video is used only to extract frame 0. The spatial keep mask is
-applied to that RGB frame, then reused to hardlock its white region after decode.
-PCD is always passed through in full. The method does not pass the RGB video or
-the mask as a separate vision item.
+applied to that RGB frame. For hardlock methods, the temporal guidance mask has
+the spatial keep mask at frame 0 and is all black for frames 1 onward; it is
+projected onto the generated target latent during every sampler step. After
+decode, frame 0's white keep region is composited from the source RGB for exact
+pixel preservation. PCD is always passed through in full. Neither the RGB video
+nor the mask is a separate vision item.
 
 ## Batch Runner
 
@@ -71,15 +74,20 @@ to the output directory.
 
 ## Inference Methods
 
-All methods use identical model inputs and sampling; they differ only in the
-post-sampling decode and hardlock step.
-Implementation: [`cosmos_framework/inference/cosmos3_no_video_path_blended_decode.py`](../cosmos_framework/inference/cosmos3_no_video_path_blended_decode.py).
+All methods use the same model inputs. Hardlock methods apply the temporal
+latent mask during sampling, then optionally use blended decoding and exact
+pixel-space frame-0 compositing. The raw method disables both hardlock steps.
+Latent projection is implemented in
+[`omni_mot_model.py`](../cosmos_framework/model/generator/omni_mot_model.py)
+and [`unipc.py`](../cosmos_framework/model/generator/diffusion/samplers/unipc.py);
+decode and pixel compositing are in
+[`cosmos3_no_video_path_blended_decode.py`](../cosmos_framework/inference/cosmos3_no_video_path_blended_decode.py).
 
-| `--method` | Decode | Frame-0 hardlock | Cosmos2.5 counterpart |
-|---|---|---|---|
-| `cosmos3_no_video_path_hardlock_blended_decode` (default) | ERP 0°/180° blended | yes | `inference_partial_hardlock_no_video_path_blended_decode.py` |
-| `cosmos3_no_video_path_hardlock` | single | yes | `inference_partial_hardlock_no_video_path.py` |
-| `cosmos3_no_video_path` | single | no | — (raw model output, for ablation) |
+| `--method` | Decode | Latent frame-0 hardlock | Pixel frame-0 compositing | Cosmos2.5 counterpart |
+|---|---|---|---|---|
+| `cosmos3_no_video_path_hardlock_blended_decode` (default) | ERP 0°/180° blended | yes | yes | `inference_partial_hardlock_no_video_path_blended_decode.py` |
+| `cosmos3_no_video_path_hardlock` | single | yes | yes | `inference_partial_hardlock_no_video_path.py` |
+| `cosmos3_no_video_path` | single | no | no | — (raw model output, for ablation) |
 
 The Cosmos2.5 script names are accepted as `--method` aliases.
 
@@ -90,11 +98,14 @@ Blended decode:
 3. Blend both decodes with a triangular weight, so the rolled decode covers
    the original left/right ERP seam.
 
-Hardlock replaces the white region of decoded frame 0 with the source RGB
-pixels. `--hardlock-erode-px` (default 8, matching the Cosmos2.5 batch
-runner) shrinks that region so the mask boundary stays generated.
+The same eroded frame-0 keep mask is used for latent projection and pixel
+compositing. `--hardlock-erode-px` (default 8, matching the Cosmos2.5 batch
+runner) shrinks that region so the boundary stays generated. The temporal mask
+is saved under each sample's `model_inputs/` as an exact `.npz` plus an MP4
+preview: frame 0 contains the spatial mask and every later frame is black.
 
-Difference from Cosmos2.5: Cosmos2.5 hardlocks frame 0 in latent space at every
-denoising step through its partial-hardlock condition mask. Cosmos3 condition
-masks are per-frame only, so the Cosmos3 hardlock is applied in pixel space
-after decode. The blended decode costs two VAE decodes per sample.
+Cosmos2.5 and Cosmos3 now have the same mask behavior: only the white region of
+frame 0 is kept, and later frames remain free to generate. Cosmos3 implements
+the latent lock by projecting the generated target latent through the resized
+mask at every sampler step, then composites frame 0 in pixel space for exact
+preservation. The blended decode costs two VAE decodes per sample.
