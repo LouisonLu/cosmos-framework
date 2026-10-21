@@ -185,6 +185,95 @@ def _vision_condition_masks(packed_sequence: PackedSequence) -> list[torch.Tenso
     return packed_sequence.vision.condition_mask
 
 
+def _apply_spatial_vision_hardlock_mask(
+    temporal_mask: torch.Tensor | list[torch.Tensor],
+    gen_data_clean: GenerationDataClean,
+    initial_noise: list[torch.Tensor],
+    condition_reference: list[torch.Tensor],
+    condition_mask: list[torch.Tensor],
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    """Apply a frame-0 spatial keep mask to the final generated vision item."""
+    if isinstance(temporal_mask, torch.Tensor):
+        if temporal_mask.ndim == 3:
+            sample_masks = [temporal_mask]
+        elif temporal_mask.ndim == 4:
+            sample_masks = list(temporal_mask)
+        else:
+            raise ValueError("temporal_mask must have shape [T,H,W] or [B,T,H,W]")
+    else:
+        sample_masks = temporal_mask
+
+    item_counts = gen_data_clean.num_vision_items_per_sample
+    vision_latents = gen_data_clean.x0_tokens_vision
+    if item_counts is None or vision_latents is None:
+        raise ValueError("Spatial vision hardlock requires a multi-item vision inference batch")
+    if len(sample_masks) != gen_data_clean.batch_size or len(item_counts) != gen_data_clean.batch_size:
+        raise ValueError("temporal_mask batch size does not match the inference batch")
+    if sum(item_counts) != len(vision_latents):
+        raise ValueError("Vision item counts do not match the encoded vision latent list")
+    if len(initial_noise) != gen_data_clean.batch_size or len(condition_reference) != gen_data_clean.batch_size:
+        raise ValueError("Sampler state batch size does not match the temporal mask")
+    if len(condition_mask) != gen_data_clean.batch_size:
+        raise ValueError("Sampler condition-mask batch size does not match the temporal mask")
+
+    vision_item_start = 0
+    for sample_index, (num_items, sample_mask) in enumerate(zip(item_counts, sample_masks, strict=True)):
+        if num_items < 2:
+            raise ValueError("Spatial vision hardlock needs a reference item and a generated target item")
+        if sample_mask.ndim != 3 or sample_mask.shape[0] < 1:
+            raise ValueError("Each temporal mask must have shape [T,H,W] with at least one frame")
+        if sample_mask.shape[-2] < 1 or sample_mask.shape[-1] < 1:
+            raise ValueError("Temporal hardlock mask must have nonempty spatial dimensions")
+        if sample_mask.shape[0] > 1 and torch.count_nonzero(sample_mask[1:]).item() != 0:
+            raise ValueError("Spatial vision hardlock expects all temporal mask frames after frame 0 to be black")
+        if sample_mask.dtype != torch.bool:
+            sample_mask = sample_mask.to(dtype=torch.float32)
+            if not torch.isfinite(sample_mask).all() or sample_mask.min() < 0 or sample_mask.max() > 1:
+                raise ValueError("Temporal hardlock mask values must be boolean or within [0,1]")
+
+        source = vision_latents[vision_item_start]
+        target_index = vision_item_start + num_items - 1
+        target = vision_latents[target_index]
+        if source.ndim != 4 or target.ndim != 4 or source.shape[1] != 1:
+            raise ValueError("Expected a single-frame source latent and a [C,T,H,W] target latent")
+        if source.shape[0] != target.shape[0] or source.shape[-2:] != target.shape[-2:]:
+            raise ValueError("Source and target latent channels/spatial dimensions must match")
+
+        keep = sample_mask[0].to(device=target.device, dtype=torch.float32)
+        keep = torch.nn.functional.interpolate(
+            keep[None, None], size=target.shape[-2:], mode="bilinear", align_corners=False
+        )[0, 0]
+        target_reference = target.clone()
+        target_reference[:, :1] = source.to(device=target.device, dtype=target.dtype)
+        target_mask = torch.zeros_like(target)
+        target_mask[:, 0] = keep.to(dtype=target_mask.dtype)[None].expand(target.shape[0], -1, -1)
+
+        flat_start = sum(vision_latents[index].numel() for index in range(vision_item_start, target_index))
+        flat_end = flat_start + target.numel()
+        reference = condition_reference[sample_index].clone()
+        mask = condition_mask[sample_index].clone()
+        noise = initial_noise[sample_index].clone()
+        if flat_end > reference.numel() or flat_end > mask.numel() or flat_end > noise.numel():
+            raise ValueError("Vision target latent range exceeds the flattened sampler state")
+
+        reference[flat_start:flat_end] = target_reference.reshape(-1).to(
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+        mask[flat_start:flat_end] = torch.maximum(
+            mask[flat_start:flat_end],
+            target_mask.reshape(-1).to(device=mask.device, dtype=mask.dtype),
+        )
+        noise = mask * reference + (1.0 - mask) * noise
+
+        initial_noise[sample_index] = noise
+        condition_reference[sample_index] = reference
+        condition_mask[sample_index] = mask
+        vision_item_start += num_items
+
+    return initial_noise, condition_reference, condition_mask
+
+
 def _per_view_caption_groups(captions: Any) -> list[list[str]] | None:
     """Return one caption list per sample when a batch carries per-view captions.
 
@@ -3544,6 +3633,7 @@ class OmniMoTModel(ImaginaireModel):
         upsample_repetition_penalty: float = 1.0,
         upsample_presence_penalty: float = 0.0,
         upsample_seed: int | None = None,
+        vision_hardlock_mask: torch.Tensor | list[torch.Tensor] | None = None,
         **kwargs,
     ) -> dict[str, list[torch.Tensor]]:
         """
@@ -3563,6 +3653,10 @@ class OmniMoTModel(ImaginaireModel):
 
         Args:
             data_batch (dict): Raw data batch from the dataloader.
+            vision_hardlock_mask (torch.Tensor | list[torch.Tensor] | None): Optional
+                pixel-space [B,T,H,W] keep mask for the generated vision item. Only
+                frame 0 may contain nonzero values; those values are resized to the
+                latent grid and projected to the clean reference at every sampler step.
             guidance (float): Classifier-free guidance weight.
             guidance_interval (list[float] | None): Optional timestep interval to apply guidance.
                 For the timesteps (ranging between 0-1000) that fall between the interval, we perform CFG, otherwise, we skip the unconditional generation.
@@ -3683,6 +3777,15 @@ class OmniMoTModel(ImaginaireModel):
             condition_mask,
             has_noisy_actions,
         ) = self._prepare_inference_data(data_batch, seed, has_negative_prompt)
+
+        if vision_hardlock_mask is not None:
+            initial_noise, condition_reference, condition_mask = _apply_spatial_vision_hardlock_mask(
+                vision_hardlock_mask,
+                gen_data_clean,
+                initial_noise,
+                condition_reference,
+                condition_mask,
+            )
 
         if n_sample is not None:
             assert n_sample == len(initial_noise), (
@@ -4082,6 +4185,16 @@ class OmniMoTModel(ImaginaireModel):
                     "condition_reference": condition_reference,
                     "condition_mask": condition_mask,
                 }
+            elif vision_hardlock_mask is not None and scheduler_type == "unipc":
+                fixed_step_sampler_kwargs = {
+                    "condition_reference": condition_reference,
+                    "condition_mask": condition_mask,
+                }
+            elif vision_hardlock_mask is not None:
+                raise ValueError(
+                    "Spatial vision hardlock is supported with UniPC and FixedStep samplers; "
+                    f"got sampler={type(sampler).__name__}, scheduler_type={scheduler_type!r}"
+                )
 
             # Explicit sampler steps drive both cache indexing and mixed precision.
             # Select W8A16/W8A8 once per sampler step; reset (trace + staging cleanup)

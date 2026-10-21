@@ -38,6 +38,8 @@ class UniPCSampler(torch.nn.Module):
         shift: float | None = None,
         seed: int | list[int] | None = None,
         step_callback: Callable[[int, int], None] | None = None,
+        condition_reference: torch.Tensor | list[torch.Tensor] | None = None,
+        condition_mask: torch.Tensor | list[torch.Tensor] | None = None,
     ) -> torch.Tensor | list[torch.Tensor]:
         """Run the UniPC multi-step sampling loop.
 
@@ -56,6 +58,10 @@ class UniPCSampler(torch.nn.Module):
                 the same length as ``noise``.
             num_steps: Number of denoising steps.
             shift: Flow-matching shift factor.  Defaults to ``self.cfg.shift``.
+            condition_reference: Optional clean reference tensor(s) to preserve
+                where ``condition_mask`` is 1.
+            condition_mask: Optional mask tensor(s), same shape as ``noise``,
+                where 1 marks clean conditioning values and 0 marks generated values.
 
         Returns:
             Denoised sample(s).  A single ``torch.Tensor`` when ``noise`` is a
@@ -64,6 +70,26 @@ class UniPCSampler(torch.nn.Module):
         if shift is None:
             shift = self.cfg.shift
         assert isinstance(shift, float), "Shift must be a float"
+        assert (condition_reference is None) == (condition_mask is None), (
+            "condition_reference and condition_mask must be both set or both None"
+        )
+
+        def _blend_condition(
+            latent: torch.Tensor,
+            reference: torch.Tensor | None,
+            mask: torch.Tensor | None,
+        ) -> torch.Tensor:
+            if reference is None:
+                return latent
+            assert mask is not None
+            reference = reference.to(device=latent.device, dtype=latent.dtype)
+            mask = mask.to(device=latent.device, dtype=latent.dtype)
+            if reference.shape != latent.shape or mask.shape != latent.shape:
+                raise ValueError(
+                    "UniPC condition reference and mask must match the latent shape: "
+                    f"latent={tuple(latent.shape)}, reference={tuple(reference.shape)}, mask={tuple(mask.shape)}"
+                )
+            return mask * reference + (1.0 - mask) * latent
 
         def _init_sample_scheduler(seed: int | None) -> tuple[torch.Generator, FlowUniPCMultistepScheduler]:
             seed_g = torch.Generator(device=self.tensor_kwargs["device"])
@@ -81,6 +107,24 @@ class UniPCSampler(torch.nn.Module):
 
         timesteps = sample_scheduler[0].timesteps if isinstance(sample_scheduler, list) else sample_scheduler.timesteps
         latent = noise
+        if isinstance(latent, list):
+            if condition_reference is None:
+                condition_reference = [None] * len(latent)
+                condition_mask = [None] * len(latent)
+            else:
+                assert isinstance(condition_reference, list), "condition_reference must be a list when noise is a list"
+                assert isinstance(condition_mask, list), "condition_mask must be a list when noise is a list"
+                assert len(condition_reference) == len(latent) and len(condition_mask) == len(latent)
+            latent = run_multiseed(
+                _blend_condition,
+                latent=latent,
+                reference=condition_reference,
+                mask=condition_mask,
+            )
+        else:
+            assert not isinstance(condition_reference, list), "condition_reference must not be a list for tensor noise"
+            assert not isinstance(condition_mask, list), "condition_mask must not be a list for tensor noise"
+            latent = _blend_condition(latent, condition_reference, condition_mask)
 
         for step_index, timestep in enumerate(progress_bar(timesteps, desc="Sampling", total=len(timesteps))):
             if step_callback is not None:
@@ -92,18 +136,21 @@ class UniPCSampler(torch.nn.Module):
                 sample_scheduler: FlowUniPCMultistepScheduler,
                 velocity_pred: torch.Tensor,
                 latent: torch.Tensor,
+                condition_reference: torch.Tensor | None,
+                condition_mask: torch.Tensor | None,
             ) -> torch.Tensor:
                 # multistep_uni_p_bh_update and multistep_uni_c_bh_update both use einsum patterns
                 # like "k,bkc...->bc...", which expect the tensor to have at least shape
                 # [B, C, ...] — where b is the batch dimension. Therefore, we need to unsqueeze
                 # the latent tensor to [B, C, ...] before passing it to the scheduler.
-                return sample_scheduler.step(
+                latent_next = sample_scheduler.step(
                     model_output=velocity_pred,
                     timestep=timestep,
                     sample=latent.unsqueeze(0),
                     return_dict=False,
                     generator=seed_g,
                 )[0].squeeze(0)
+                return _blend_condition(latent_next, condition_reference, condition_mask)
 
             latent = run_multiseed(
                 _scheduler_step,
@@ -111,6 +158,8 @@ class UniPCSampler(torch.nn.Module):
                 sample_scheduler=sample_scheduler,
                 velocity_pred=velocity_pred,
                 latent=latent,
+                condition_reference=condition_reference,
+                condition_mask=condition_mask,
             )
 
         return latent

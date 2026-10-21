@@ -19,10 +19,15 @@ from PIL import Image
 from cosmos_framework.data.generator.local_datasets.pwp_stage1_mask_pool import apply_keep_mask
 from cosmos_framework.inference.pwp_nano_inference import (
     PwPNanoPreparedInputs,
+    build_temporal_guidance_mask,
     load_prompt,
     load_pwp_nano_inference_inputs,
 )
-from cosmos_framework.inference.cosmos3_no_video_path_blended_decode import decode_erp_blended, hardlock_first_frame
+from cosmos_framework.inference.cosmos3_no_video_path_blended_decode import (
+    decode_erp_blended,
+    erode_keep_mask,
+    hardlock_first_frame,
+)
 from cosmos_framework.tools.visualize.video import save_img_or_video
 
 
@@ -75,13 +80,13 @@ INFERENCE_METHODS: dict[str, InferenceMethod] = {
             "cosmos3_no_video_path_hardlock_blended_decode",
             blended_decode=True,
             hardlock_first_frame=True,
-            description="ERP 0/180-degree blended decode, then frame-0 white-region hardlock",
+            description="frame-0 latent hardlock, ERP 0/180-degree blended decode, and pixel hardlock",
         ),
         InferenceMethod(
             "cosmos3_no_video_path_hardlock",
             blended_decode=False,
             hardlock_first_frame=True,
-            description="single VAE decode, then frame-0 white-region hardlock",
+            description="frame-0 latent hardlock, single VAE decode, and pixel hardlock",
         ),
         InferenceMethod(
             "cosmos3_no_video_path",
@@ -308,6 +313,9 @@ def resolve_mask_for_inference(
 def dump_prepared_inputs(
     prepared: PwPNanoPreparedInputs,
     *,
+    temporal_guidance_mask: np.ndarray,
+    temporal_hardlock_enabled: bool,
+    hardlock_erode_px: int,
     output_dir: Path,
     prompt: str,
     first_frame_path: Path,
@@ -321,12 +329,23 @@ def dump_prepared_inputs(
     masked_first = apply_keep_mask(prepared.first_frame, prepared.keep_mask, 0)
     pcd_control = prepared.pcd_frames
     generated_placeholder = np.zeros_like(pcd_control)
-    mask_rgb = np.repeat((prepared.keep_mask.astype(np.uint8) * 255)[..., None], 3, axis=2)
-    mask_video = np.repeat(mask_rgb[None], pcd_control.shape[0], axis=0)
+    if temporal_guidance_mask.shape != (len(pcd_control), prepared.height, prepared.width):
+        raise ValueError(
+            "Temporal guidance mask shape must match the model video: "
+            f"mask={temporal_guidance_mask.shape}, video={(len(pcd_control), prepared.height, prepared.width)}"
+        )
+    mask_video = np.repeat(temporal_guidance_mask[..., None], 3, axis=-1).astype(np.uint8) * 255
 
     Image.fromarray(masked_first, mode="RGB").save(output_dir / "masked_first_frame_model_input.png")
     Image.fromarray(prepared.keep_mask.astype(np.uint8) * 255, mode="L").save(
         output_dir / "guided_generation_mask_resized.png"
+    )
+    Image.fromarray(temporal_guidance_mask[0].astype(np.uint8) * 255, mode="L").save(
+        output_dir / "temporal_latent_hardlock_mask_frame0.png"
+    )
+    np.savez_compressed(
+        output_dir / "temporal_latent_hardlock_mask.npz",
+        mask=temporal_guidance_mask.astype(np.uint8),
     )
     save_img_or_video(
         torch.from_numpy(pcd_control).permute(3, 0, 1, 2),
@@ -387,12 +406,25 @@ def dump_prepared_inputs(
                 ],
                 "normalization": "uint8 [0,255] -> float32 [-1,1]",
                 "mask_semantics": (
-                    "mask first RGB and hardlock the white frame-0 region; PCD remains full"
+                    "mask first RGB; latent sampler hardlocks only the white frame-0 region, "
+                    "and frames 1..T-1 are black/free to generate; PCD remains full"
+                    if temporal_hardlock_enabled
+                    else "mask first RGB; temporal latent hardlock is disabled; PCD remains full"
                 ),
+                "temporal_latent_hardlock_mask_shape": list(temporal_guidance_mask.shape),
+                "temporal_mask_space": "pixel resolution; bilinearly resized to the generated latent grid",
+                "temporal_latent_hardlock_mask_frame_0": (
+                    "spatial keep mask, resized to latent resolution in the sampler"
+                    if temporal_hardlock_enabled
+                    else "all zero because temporal hardlock is disabled"
+                ),
+                "temporal_latent_hardlock_mask_frames_1_to_end": "all zero; freely generated",
+                "temporal_latent_hardlock_enabled": temporal_hardlock_enabled,
+                "hardlock_erode_px": hardlock_erode_px,
                 "mask_fill_value": 0,
                 "fps": prepared.fps,
                 "num_frames": int(prepared.pcd_frames.shape[0]),
-                "note": "guided_generation_mask is consumed during preprocessing; it is not a fourth vision item.",
+                "note": "The temporal mask is sampler guidance, not a fourth vision item.",
             },
             indent=2,
         )
@@ -449,6 +481,15 @@ def generate_sample(
         device=pipe.model.tensor_kwargs["device"],
         mask_fill_value=mask_fill_value,
     )
+    latent_keep_mask = (
+        erode_keep_mask(prepared.keep_mask, hardlock_erode_px)
+        if method.hardlock_first_frame
+        else np.zeros_like(prepared.keep_mask, dtype=bool)
+    )
+    temporal_guidance_mask = build_temporal_guidance_mask(
+        latent_keep_mask,
+        int(prepared.pcd_frames.shape[0]),
+    )
     decode_method = "erp_0_180_blended" if method.blended_decode else "single"
     (output_dir / "cosmos3_inference_input.json").write_text(
         json.dumps(
@@ -459,7 +500,11 @@ def generate_sample(
                     "generated_full_rgb",
                     "prompt",
                 ],
-                "mask_role": "first_rgb_conditioning_and_frame0_hardlock",
+                "mask_role": (
+                    "first_rgb_mask_and_frame0_only_latent_hardlock"
+                    if method.hardlock_first_frame
+                    else "first_rgb_mask_only"
+                ),
                 "rgb_video_path": str(sample.rgb_path.resolve()),
                 "first_frame_path": str(first_frame_path.resolve()),
                 "pcd_path": str(sample.pcd_path.resolve()),
@@ -472,6 +517,12 @@ def generate_sample(
                 "method": method.name,
                 "hardlock_first_frame": method.hardlock_first_frame,
                 "hardlock_erode_px": hardlock_erode_px,
+                "temporal_latent_hardlock_enabled": method.hardlock_first_frame,
+                "temporal_latent_hardlock_mask": (
+                    "frame 0 spatial keep mask; frames 1..end are all zero"
+                    if method.hardlock_first_frame
+                    else "disabled for this inference method"
+                ),
                 "pcd_mode": "full",
                 "decode_method": decode_method,
                 "use_ema_weights": use_ema_weights,
@@ -484,6 +535,9 @@ def generate_sample(
     if dump_inputs:
         dump_prepared_inputs(
             prepared,
+            temporal_guidance_mask=temporal_guidance_mask,
+            temporal_hardlock_enabled=method.hardlock_first_frame,
+            hardlock_erode_px=hardlock_erode_px,
             output_dir=output_dir / "model_inputs",
             prompt=prompt,
             first_frame_path=first_frame_path,
@@ -505,6 +559,11 @@ def generate_sample(
         has_negative_prompt=False,
         n_sample=1,
         normalize_cfg=False,
+        vision_hardlock_mask=(
+            torch.from_numpy(temporal_guidance_mask).unsqueeze(0).to(device=pipe.model.tensor_kwargs["device"])
+            if method.hardlock_first_frame
+            else None
+        ),
     )
     latent = generated["vision"][0]
     if latent.ndim == 4:
@@ -539,6 +598,8 @@ def generate_sample(
                 "decode_method": decode_method,
                 "hardlock_first_frame": method.hardlock_first_frame,
                 "hardlock_erode_px": hardlock_erode_px,
+                "temporal_latent_hardlock_enabled": method.hardlock_first_frame,
+                "temporal_latent_hardlock_frames": [0] if method.hardlock_first_frame else [],
             },
             indent=2,
         )

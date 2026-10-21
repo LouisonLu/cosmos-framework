@@ -57,6 +57,17 @@ def normalize_frames(frames: np.ndarray) -> torch.Tensor:
     return tensor.permute(3, 0, 1, 2) / 127.5 - 1.0
 
 
+def build_temporal_guidance_mask(keep_mask: np.ndarray, num_frames: int) -> np.ndarray:
+    """Build the Cosmos2.5-style mask: spatial keep region at t=0, black afterward."""
+    if keep_mask.ndim != 2:
+        raise ValueError(f"Expected a 2D keep mask, got {keep_mask.shape}")
+    if num_frames < 1:
+        raise ValueError(f"num_frames must be positive, got {num_frames}")
+    temporal_mask = np.zeros((num_frames, *keep_mask.shape), dtype=bool)
+    temporal_mask[0] = keep_mask.astype(bool, copy=False)
+    return temporal_mask
+
+
 def decode_video(path: str | Path, *, height: int, width: int) -> tuple[np.ndarray, dict[str, Any]]:
     """Decode a local video using the same ffmpeg path as the training dataset."""
     path = Path(path).expanduser()
