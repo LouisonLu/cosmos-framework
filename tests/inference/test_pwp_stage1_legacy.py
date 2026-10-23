@@ -3,6 +3,7 @@ import torch
 
 from cosmos_framework.inference.pwp_stage1_legacy import (
     build_pwp_stage1_batch,
+    erode_keep_mask,
     hardlock_first_frame,
 )
 
@@ -42,3 +43,16 @@ def test_legacy_hardlock_restores_only_white_region_of_frame_zero():
     assert torch.all(output[:, :, 0, :, :2] == 1)
     assert torch.all(output[:, :, 0, :, 2:] == 0)
     assert torch.all(output[:, :, 1] == 0)
+
+
+def test_legacy_mask_erosion_shrinks_keep_region_by_requested_pixels():
+    keep = np.zeros((48, 60), dtype=bool)
+    keep[4:44, 5:55] = True
+
+    eroded = erode_keep_mask(keep, 16)
+
+    assert eroded.sum() == 8 * 18
+    assert eroded[20:28, 21:39].all()
+    assert not eroded[:20].any()
+    assert not eroded[:, :21].any()
+    np.testing.assert_array_equal(erode_keep_mask(keep, 0), keep)
