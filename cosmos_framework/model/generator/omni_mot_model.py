@@ -2337,7 +2337,7 @@ class OmniMoTModel(ImaginaireModel):
                 build_latent_valid_mask(
                     mask,
                     latent.shape[-3:],
-                    spatial_guard_px=8,
+                    spatial_guard_px=16,
                     temporal_guard_frames=1,
                     min_valid_ratio=0.01,
                 )
@@ -2366,7 +2366,7 @@ class OmniMoTModel(ImaginaireModel):
                 build_latent_valid_mask(
                     pixel_mask,
                     x0_vision[target_index].shape[-3:],
-                    spatial_guard_px=8,
+                    spatial_guard_px=16,
                     temporal_guard_frames=1,
                     min_valid_ratio=0.01,
                 )

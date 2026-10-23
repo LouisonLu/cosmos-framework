@@ -36,8 +36,8 @@ full and is not masked in this Stage 2 contract.
 
 The pixel mask is conservatively reduced to the RGB target latent grid: a
 latent cell is valid only when its source bin contains no black pixel. To
-match the Cosmos 2.5 Stage 2 target-loss implementation, the model also uses
-an 8-pixel spatial guard, a 1-frame temporal guard, and rejects samples with
+use a one-spatial-latent-stride guard for Cosmos 3, the model also uses a
+16-pixel spatial guard, a 1-frame temporal guard, and rejects samples with
 less than 1% valid latent coverage. These guards remove boundary-contaminated
 latent cells; they do not make black regions contribute to the loss.
 
