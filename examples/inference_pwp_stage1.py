@@ -49,6 +49,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance", type=float, default=6.0)
     parser.add_argument("--shift", type=float, default=5.0)
     parser.add_argument("--mask-fill-value", type=int, default=0)
+    parser.add_argument(
+        "--mask-erode-px",
+        type=int,
+        default=0,
+        help="Erode the white keep mask before masking RGB/PCD inputs and frame-0 hardlock.",
+    )
     hardlock = parser.add_mutually_exclusive_group()
     hardlock.add_argument("--hardlock-first-frame", dest="hardlock_first_frame", action="store_true")
     hardlock.add_argument("--no-hardlock-first-frame", dest="hardlock_first_frame", action="store_false")
@@ -58,6 +64,8 @@ def _parse_args() -> argparse.Namespace:
 
 @torch.no_grad()
 def run(args: argparse.Namespace) -> Path:
+    if args.mask_erode_px < 0:
+        raise ValueError(f"--mask-erode-px must be non-negative, got {args.mask_erode_px}")
     output_dir = Path(args.output_dir).expanduser().absolute()
     init_output_dir(output_dir)
     setup_kwargs = {
@@ -89,6 +97,7 @@ def run(args: argparse.Namespace) -> Path:
         fps=args.fps,
         device=pipe.model.tensor_kwargs["device"],
         mask_fill_value=args.mask_fill_value,
+        mask_erode_px=args.mask_erode_px,
     )
 
     (output_dir / "pwp_stage1_input.json").write_text(
@@ -97,7 +106,8 @@ def run(args: argparse.Namespace) -> Path:
                 "pipeline": "historical_inference_pwp_stage1",
                 "source_commit": "a5877f2278d11cb1bb0eae218cc8a9ce68c41714",
                 "contract": ["masked_first_rgb", "masked_pcd_control", "generated_full_rgb"],
-                "mask_role": "spatial_keep_mask_no_erosion",
+                "mask_role": "spatial_keep_mask_eroded_before_input_and_hardlock",
+                "mask_erode_px": args.mask_erode_px,
                 "first_frame_path": str(Path(args.first_frame_path).expanduser().absolute()),
                 "pcd_path": str(Path(args.pcd_path).expanduser().absolute()),
                 "guided_generation_mask_path": (

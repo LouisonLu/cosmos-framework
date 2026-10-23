@@ -9,12 +9,15 @@ does not import or call `pwp_nano_inference`.
 
 - Inputs: one RGB first-frame image, a PCD video, a prompt, and an optional
   binary PNG keep mask (white means preserve; black means generate).
-- The same spatial mask is applied to the first RGB frame and every PCD frame.
+- `--mask-erode-px` defaults to `0`. When set, the white keep region is eroded
+  before applying the same spatial mask to the first RGB frame, every PCD frame,
+  and the frame-zero pixel hardlock.
 - The model receives masked first RGB, masked PCD, prompt, and an empty RGB
   generation placeholder. It does not receive the RGB target video.
-- After decode, frame zero is hardlocked in the white keep region.
-- The mask is resized with nearest-neighbor and is not eroded. Decode uses one
-  VAE call; this path has no ERP blended decode or temporal latent guidance.
+- After decode, frame zero is hardlocked in the effective white keep region.
+- The mask is resized with nearest-neighbor before optional erosion. Decode
+  uses one VAE call; this path has no ERP blended decode or temporal latent
+  guidance.
 
 This intentionally retains the historical Stage1 conditioning. Cosmos3 Stage2
 training uses full unmasked PCD, so this legacy inference path gives a Stage2

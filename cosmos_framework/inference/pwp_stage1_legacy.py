@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from cosmos_framework.data.generator.local_datasets.helper import (
@@ -64,12 +65,31 @@ def decode_image(path: str | Path, *, height: int, width: int) -> np.ndarray:
 
 
 def resize_keep_mask(mask: np.ndarray, height: int, width: int) -> np.ndarray:
-    """Resize the binary keep mask with nearest-neighbor; deliberately no erosion."""
+    """Resize the binary keep mask with nearest-neighbor."""
     if mask.shape == (height, width):
         return mask.astype(bool, copy=False)
     image = Image.fromarray((mask > 0).astype(np.uint8) * 255)
     image = image.resize((width, height), Image.Resampling.NEAREST)
     return np.asarray(image, dtype=np.uint8) > 0
+
+
+def erode_keep_mask(keep_mask: np.ndarray, erode_px: int) -> np.ndarray:
+    """Shrink the white keep region with a square max-pool erosion kernel."""
+    if keep_mask.ndim != 2:
+        raise ValueError(f"Expected a 2D keep mask, got {keep_mask.shape}")
+    if erode_px < 0:
+        raise ValueError(f"erode_px must be non-negative, got {erode_px}")
+    if erode_px == 0:
+        return keep_mask.astype(bool, copy=False)
+
+    binary = torch.from_numpy(np.ascontiguousarray(keep_mask, dtype=bool)).float()[None, None]
+    eroded = 1.0 - F.max_pool2d(
+        1.0 - binary,
+        kernel_size=2 * erode_px + 1,
+        stride=1,
+        padding=erode_px,
+    )
+    return eroded[0, 0].numpy() >= 0.5
 
 
 def apply_keep_mask(frames: np.ndarray, keep_mask: np.ndarray, fill_value: int = 0) -> np.ndarray:
@@ -170,6 +190,7 @@ def load_pwp_stage1_inputs(
     fps: float | None = None,
     device: str | torch.device = "cuda",
     mask_fill_value: int = 0,
+    mask_erode_px: int = 0,
 ) -> PwPStage1PreparedInputs:
     first_frame = decode_image(first_frame_path, height=height, width=width)
     pcd_all, pcd_info = decode_video(pcd_path, height=height, width=width)
@@ -192,6 +213,7 @@ def load_pwp_stage1_inputs(
         with Image.open(Path(mask_path).expanduser()) as mask_image:
             raw_mask = np.asarray(mask_image.convert("L"), dtype=np.uint8)
         keep_mask = resize_keep_mask(raw_mask, height, width)
+    keep_mask = erode_keep_mask(keep_mask, mask_erode_px)
 
     effective_fps = float(pcd_info["fps"] if fps is None else fps)
     batch = build_pwp_stage1_batch(
