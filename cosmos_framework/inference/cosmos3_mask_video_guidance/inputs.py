@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from cosmos_framework.data.generator.local_datasets.helper import ffmpeg_decode_video, get_video_metadata
@@ -38,6 +39,7 @@ class PreparedSample:
     prompt: str
     first_frame: np.ndarray
     masked_first_frame: np.ndarray
+    source_spatial_keep_mask: np.ndarray
     spatial_keep_mask: np.ndarray
     temporal_guidance_mask: np.ndarray
     pcd_frames: np.ndarray
@@ -179,6 +181,23 @@ def load_first_frame_mask(path: Path, *, height: int, width: int) -> np.ndarray:
     return keep
 
 
+def erode_keep_mask(keep_mask: np.ndarray, erode_px: int) -> np.ndarray:
+    """Shrink the white keep region by erode_px pixels, treating outside as black."""
+    if keep_mask.ndim != 2:
+        raise ValueError(f"Expected a 2D keep mask, got {keep_mask.shape}")
+    if erode_px < 0:
+        raise ValueError(f"erode_px must be non-negative, got {erode_px}")
+    binary = np.ascontiguousarray(keep_mask, dtype=bool)
+    if erode_px == 0:
+        return binary.copy()
+
+    radius = int(erode_px)
+    invalid = 1.0 - torch.from_numpy(binary.astype(np.float32))[None, None]
+    padded = F.pad(invalid, (radius, radius, radius, radius), value=1.0)
+    eroded = 1.0 - F.max_pool2d(padded, kernel_size=2 * radius + 1, stride=1)
+    return eroded[0, 0].numpy() >= 0.5
+
+
 def build_temporal_guidance_mask(spatial_keep_mask: np.ndarray, num_frames: int = 93) -> np.ndarray:
     """Return [T,H,W] guidance with the spatial keep mask at t=0 and zeros afterward."""
     if spatial_keep_mask.ndim != 2:
@@ -259,6 +278,7 @@ def prepare_sample(
     width: int,
     height: int,
     mask_fill_value: int,
+    mask_erode_px: int,
     fps_override: float | None,
     device: str | torch.device,
 ) -> PreparedSample:
@@ -267,7 +287,12 @@ def prepare_sample(
             f"num_frames={num_frames} must be 1 + k*{temporal_compression} for the Cosmos3 video VAE"
         )
     first_frame = _read_first_frame(sample.rgb_path, height=height, width=width)
-    keep_mask = load_first_frame_mask(sample.mask_path, height=height, width=width)
+    source_keep_mask = load_first_frame_mask(sample.mask_path, height=height, width=width)
+    keep_mask = erode_keep_mask(source_keep_mask, mask_erode_px)
+    if not keep_mask.any():
+        raise ValueError(
+            f"Mask frame 0 has no keep pixels after {mask_erode_px}px erosion: {sample.mask_path}"
+        )
     temporal_mask = build_temporal_guidance_mask(keep_mask, num_frames)
     masked_first = mask_first_frame(first_frame, keep_mask, mask_fill_value)
 
@@ -294,6 +319,7 @@ def prepare_sample(
         prompt=prompt,
         first_frame=first_frame,
         masked_first_frame=masked_first,
+        source_spatial_keep_mask=source_keep_mask,
         spatial_keep_mask=keep_mask,
         temporal_guidance_mask=temporal_mask,
         pcd_frames=pcd_frames,

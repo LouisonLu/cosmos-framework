@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shift", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=2025)
     parser.add_argument("--mask-fill-value", type=int, default=0)
+    parser.add_argument(
+        "--mask-erode-px",
+        type=int,
+        default=16,
+        help="Erode the white frame-0 keep mask by this many pixels before conditioning and hardlock",
+    )
     parser.add_argument("--no-blended-decode", action="store_true")
     parser.add_argument("--no-ema-weights", dest="use_ema_weights", action="store_false")
     parser.set_defaults(use_ema_weights=True)
@@ -81,6 +87,8 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("width, height, num-frames, and steps must be positive")
     if not 0 <= args.mask_fill_value <= 255:
         raise ValueError("mask-fill-value must be in [0,255]")
+    if args.mask_erode_px < 0:
+        raise ValueError("mask-erode-px must be non-negative")
 
     samples = discover_samples(
         args.data_root,
@@ -111,6 +119,7 @@ def run(args: argparse.Namespace) -> int:
                 {
                     "method": METHOD_NAME,
                     "checkpoint": args.checkpoint_path,
+                    "mask_erode_px": args.mask_erode_px,
                     "selected_samples": [
                         {
                             "stem": sample.stem,
@@ -159,7 +168,8 @@ def run(args: argparse.Namespace) -> int:
         seed = args.seed + args.start_index + index
         filename = (
             f"{sample.stem}__cosmos3_{label}_{METHOD_NAME}"
-            f"_steps{args.steps}_g{args.guidance:g}_shift{args.shift:g}_seed{seed}.mp4"
+            f"_steps{args.steps}_g{args.guidance:g}_shift{args.shift:g}_seed{seed}"
+            f"_erode{args.mask_erode_px}.mp4"
         )
         output_path = output_dir / filename
         metadata_dir = output_dir / "metadata" / Path(filename).stem
@@ -185,6 +195,7 @@ def run(args: argparse.Namespace) -> int:
                 guidance=args.guidance,
                 shift=args.shift,
                 mask_fill_value=args.mask_fill_value,
+                mask_erode_px=args.mask_erode_px,
                 blended_decode=not args.no_blended_decode,
             )
         except Exception as exc:
