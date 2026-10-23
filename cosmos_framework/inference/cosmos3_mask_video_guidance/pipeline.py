@@ -93,6 +93,7 @@ class Cosmos3MaskVideoGuidancePipeline:
         guidance: float = 7.0,
         shift: float = 5.0,
         mask_fill_value: int = 0,
+        mask_erode_px: int = 16,
         blended_decode: bool = True,
     ) -> Path:
         prepared = prepare_sample(
@@ -103,6 +104,7 @@ class Cosmos3MaskVideoGuidancePipeline:
             width=width,
             height=height,
             mask_fill_value=mask_fill_value,
+            mask_erode_px=mask_erode_px,
             fps_override=fps,
             device=self.model.tensor_kwargs["device"],
         )
@@ -144,6 +146,7 @@ class Cosmos3MaskVideoGuidancePipeline:
                 "guidance": guidance,
                 "shift": shift,
                 "mask_fill_value": mask_fill_value,
+                "mask_erode_px": mask_erode_px,
             },
         )
         del generated, latent, decoded, video
@@ -162,6 +165,9 @@ class Cosmos3MaskVideoGuidancePipeline:
         generation: dict[str, Any],
     ) -> None:
         Image.fromarray(prepared.masked_first_frame).save(metadata_dir / "masked_first_rgb.png")
+        Image.fromarray(prepared.source_spatial_keep_mask.astype(np.uint8) * 255).save(
+            metadata_dir / "mask_frame0_keep_source.png"
+        )
         Image.fromarray(prepared.spatial_keep_mask.astype(np.uint8) * 255).save(metadata_dir / "mask_frame0_keep.png")
         mask_video = np.repeat(prepared.temporal_guidance_mask[..., None].astype(np.uint8) * 255, 3, axis=-1)
         save_img_or_video(
@@ -187,15 +193,16 @@ class Cosmos3MaskVideoGuidancePipeline:
             "prompt": prepared.prompt,
             "target_placeholder": "all-zero pixels define shape only; the sampler initializes the target from noise",
             "mask_video_role": "sampler-side temporal guidance; it is not a fourth learned vision item",
-            "temporal_guidance": "mask frame 0 is spatial keep mask; all later frames are black and generated",
+            "temporal_guidance": "eroded mask frame 0 is the spatial keep mask; all later frames are black and generated",
             "keep_polarity": "white=keep, black=generate",
-            "target_hardlock": "generated RGB target latent frame 0 only, at every UniPC step",
+            "mask_erode_px": generation["mask_erode_px"],
+            "target_hardlock": "generated RGB target latent frame 0 only, at every UniPC step, using the eroded keep mask",
             "output": str(output_path),
             "num_frames": int(prepared.pcd_frames.shape[0]),
             "fps": prepared.fps,
             "resolution": [int(prepared.first_frame.shape[1]), int(prepared.first_frame.shape[0])],
             "decode": "erp_0_180_blended" if blended_decode else "single_vae_decode",
-            "first_frame_pixel_composite": "source RGB copied exactly within frame-0 white keep mask",
+            "first_frame_pixel_composite": "source RGB copied exactly within the eroded frame-0 keep mask",
             "generation": generation,
         }
         (metadata_dir / "model_input_contract.json").write_text(

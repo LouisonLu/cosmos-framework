@@ -7,6 +7,7 @@ import torch
 from cosmos_framework.inference.cosmos3_mask_video_guidance.decode import composite_first_frame
 from cosmos_framework.inference.cosmos3_mask_video_guidance.inputs import (
     build_temporal_guidance_mask,
+    erode_keep_mask,
     mask_first_frame,
 )
 from cosmos_framework.inference.cosmos3_mask_video_guidance.sampler import (
@@ -35,6 +36,28 @@ def test_masked_first_rgb_zeros_only_generation_region():
 
     assert np.all(result[:, :2] == 200)
     assert np.all(result[:, 2:] == 0)
+
+
+def test_erode_keep_mask_shrinks_white_region_by_requested_pixels():
+    keep = np.ones((48, 60), dtype=bool)
+
+    eroded = erode_keep_mask(keep, 16)
+
+    assert not eroded[:16].any()
+    assert not eroded[-16:].any()
+    assert not eroded[:, :16].any()
+    assert not eroded[:, -16:].any()
+    assert eroded[16:-16, 16:-16].all()
+
+
+def test_erode_keep_mask_zero_preserves_source_mask():
+    keep = np.zeros((10, 12), dtype=bool)
+    keep[2:8, 3:9] = True
+
+    eroded = erode_keep_mask(keep, 0)
+
+    np.testing.assert_array_equal(eroded, keep)
+    assert eroded is not keep
 
 
 def test_latent_mask_rejects_nonblack_future_frames():
